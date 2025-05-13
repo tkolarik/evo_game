@@ -1,0 +1,53 @@
+# Rust & Cargo
+/target/
+Cargo.lock
+
+# Build artifacts
+*.rlib
+*.rmeta
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Executables (if not in target/debug or target/release)
+*.exe
+
+# Operating System specific files
+.DS_Store
+._*
+Thumbs.db
+
+# IDE / Editor specific files
+.idea/
+.vscode/
+*.iml
+*.project
+*.classpath
+*.nbproject/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Local environment files
+.env
+
+# Test & Profile data
+*.profraw
+profile*
+*.gcno
+*.gcda
+
+# Generated documentation (if stored in project root)
+# docs/
+
+# Log files
+*.log
+
+# User-specific files or directories
+# e.g., my_notes/
+
+# If using gitingest or similar tools that produce local digests
+digest.txt 

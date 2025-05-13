@@ -1,0 +1,13 @@
+[package]
+name = "evo_game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand = "0.8"
+rapier2d = { version = "0.18", features = ["simd-stable"] } # Added simd-stable feature for potential perf
+rand_distr = "0.4" # For Gaussian distribution in mutations
+bevy = "0.12.1" # Pin to latest 0.12 patch
+bevy_rapier2d = { version = "0.23.0", features = [] } # "simd-stable" was removed, ensure no features if not needed or "render" if that was for debug lines and is available
+bevy_egui = "0.23.0" # Changed from 0.22.0
+dot = "0.1" # For Graphviz DOT file generation 
