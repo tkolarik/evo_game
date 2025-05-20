@@ -502,7 +502,6 @@ fn setup_current_vehicle_for_visualization(
             Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
             // Add velocity limits to prevent explosion
             Ccd::enabled(), // Enable Continuous Collision Detection for stability
-            GravityScale(1.0), // Ensure normal gravity
             CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
             ActiveEvents::COLLISION_EVENTS,
             Name::new("DebugChassis"),
@@ -540,7 +539,6 @@ fn setup_current_vehicle_for_visualization(
                 Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
                 // Add velocity limits to prevent explosion
                 Ccd::enabled(), // Enable CCD for wheel too
-                GravityScale(1.0), // Ensure normal gravity
                 CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
                 ExternalImpulse::default(),
                 Name::new("DebugWheel"),
@@ -601,6 +599,7 @@ fn setup_current_vehicle_for_visualization(
             CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
             ActiveEvents::COLLISION_EVENTS, 
             Name::new("Chassis"),
+            Ccd::enabled(), // Enable CCD for chassis
             VehiclePart,
         )).id();
 
@@ -632,6 +631,7 @@ fn setup_current_vehicle_for_visualization(
                     CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
                     ExternalImpulse::default(), 
                     Name::new("Wheel"),
+                    Ccd::enabled(), // Enable CCD for wheels
                     VehiclePart,
                     VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
                 )).id();

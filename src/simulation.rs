@@ -2,6 +2,12 @@ use crate::organism::{Chromosome};
 use rapier2d::prelude::*; 
 use bevy::prelude::Resource;
 
+// --- Collision Groups (mirrored from main.rs) ---
+const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
+const GROUP_GROUND: u32 = 1 << 1;  // 0b00000010
+// const VEHICLE_FILTER: u32 = GROUP_GROUND; // Vehicles collide with ground - Not directly used by ColliderBuilder like this
+// const GROUND_FILTER: u32 = GROUP_VEHICLE;   // Ground collides with vehicles - Not directly used by ColliderBuilder like this
+
 // Placeholder for physics world details
 pub struct PhysicsWorld {
     gravity: Vector<f32>,
@@ -50,6 +56,7 @@ impl PhysicsWorld {
         let ground_collider = ColliderBuilder::cuboid(1000.0, GROUND_THICKNESS) // Effectively infinite ground
             .friction(self.ground_friction)
             .restitution(self.ground_restitution)
+            .collision_groups(InteractionGroups::new(GROUP_GROUND.into(), GROUP_VEHICLE.into())) // Ground interacts with vehicles
             .build();
         collider_set.insert_with_parent(ground_collider, ground_handle, &mut rigid_body_set);
 
@@ -65,6 +72,7 @@ impl PhysicsWorld {
             .translation(vector![initial_chassis_x, initial_chassis_y])
             .linear_damping(5.0)
             .angular_damping(5.0)
+            .ccd_enabled(true)
             .build();
         let chassis_handle = rigid_body_set.insert(chassis_rigid_body);
         vehicle_part_handles.push(chassis_handle);
@@ -72,6 +80,7 @@ impl PhysicsWorld {
         let chassis_collider = ColliderBuilder::cuboid(chromosome.chassis.width / 2.0, chromosome.chassis.height / 2.0)
             .density(chromosome.chassis.density)
             .friction(0.7) // Default chassis friction
+            .collision_groups(InteractionGroups::new(GROUP_VEHICLE.into(), GROUP_GROUND.into())) // Vehicle interacts with ground
             .build();
         collider_set.insert_with_parent(chassis_collider, chassis_handle, &mut rigid_body_set);
 
@@ -88,6 +97,7 @@ impl PhysicsWorld {
                     ])
                     .linear_damping(5.0)
                     .angular_damping(5.0)
+                    .ccd_enabled(true)
                     .build();
                 let wheel_handle = rigid_body_set.insert(wheel_rb);
                 vehicle_part_handles.push(wheel_handle);
@@ -96,6 +106,7 @@ impl PhysicsWorld {
                     .density(wheel_gene.density)
                     .friction(wheel_gene.friction_coefficient)
                     .restitution(0.1) // Wheels might have a little bounce
+                    .collision_groups(InteractionGroups::new(GROUP_VEHICLE.into(), GROUP_GROUND.into())) // Vehicle parts interact with ground
                     .build();
                 collider_set.insert_with_parent(wheel_collider, wheel_handle, &mut rigid_body_set);
 
