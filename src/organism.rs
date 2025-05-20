@@ -8,15 +8,15 @@ pub const MAX_CHASSIS_WIDTH: f32 = 4.0;
 pub const MIN_CHASSIS_HEIGHT: f32 = 0.2;
 pub const MAX_CHASSIS_HEIGHT: f32 = 3.0;
 pub const MIN_CHASSIS_DENSITY: f32 = 0.5;
-pub const MAX_CHASSIS_DENSITY: f32 = 5.0;
+pub const MAX_CHASSIS_DENSITY: f32 = 3.0;
 
 // Wheel
-pub const MIN_WHEEL_RADIUS: f32 = 0.1;
+pub const MIN_WHEEL_RADIUS: f32 = 0.3;
 pub const MAX_WHEEL_RADIUS: f32 = 1.5;
 pub const MIN_WHEEL_DENSITY: f32 = 0.3;
-pub const MAX_WHEEL_DENSITY: f32 = 4.0;
-pub const MIN_WHEEL_MOTOR_TORQUE: f32 = -0.001;
-pub const MAX_WHEEL_MOTOR_TORQUE: f32 = 0.001;
+pub const MAX_WHEEL_DENSITY: f32 = 2.0;
+pub const MIN_WHEEL_MOTOR_TORQUE: f32 = -0.000001;
+pub const MAX_WHEEL_MOTOR_TORQUE: f32 = 0.000001;
 pub const MIN_WHEEL_FRICTION_COEFFICIENT: f32 = 0.2;
 pub const MAX_WHEEL_FRICTION_COEFFICIENT: f32 = 2.0;
 

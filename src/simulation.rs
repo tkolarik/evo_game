@@ -1,4 +1,4 @@
-use crate::organism::{Chromosome, WheelGenes};
+use crate::organism::{Chromosome};
 use rapier2d::prelude::*; 
 use bevy::prelude::Resource;
 
@@ -53,6 +53,9 @@ impl PhysicsWorld {
             .build();
         collider_set.insert_with_parent(ground_collider, ground_handle, &mut rigid_body_set);
 
+        // Store all vehicle part handles
+        let mut vehicle_part_handles: Vec<RigidBodyHandle> = Vec::new();
+
         // 2. Genotype to Phenotype Mapping: Create the vehicle
         let initial_chassis_x = 0.0;
         let initial_chassis_y = config.initial_height_above_ground + chromosome.chassis.height / 2.0;
@@ -64,14 +67,13 @@ impl PhysicsWorld {
             .angular_damping(5.0)
             .build();
         let chassis_handle = rigid_body_set.insert(chassis_rigid_body);
+        vehicle_part_handles.push(chassis_handle);
         
         let chassis_collider = ColliderBuilder::cuboid(chromosome.chassis.width / 2.0, chromosome.chassis.height / 2.0)
             .density(chromosome.chassis.density)
             .friction(0.7) // Default chassis friction
             .build();
         collider_set.insert_with_parent(chassis_collider, chassis_handle, &mut rigid_body_set);
-
-        let mut active_wheel_motors: Vec<(RigidBodyHandle, f32)> = Vec::new();
 
         // Create wheels and attach them
         for wheel_gene in &chromosome.wheels {
@@ -88,6 +90,7 @@ impl PhysicsWorld {
                     .angular_damping(5.0)
                     .build();
                 let wheel_handle = rigid_body_set.insert(wheel_rb);
+                vehicle_part_handles.push(wheel_handle);
                 
                 let wheel_collider = ColliderBuilder::ball(wheel_gene.radius)
                     .density(wheel_gene.density)
@@ -97,38 +100,30 @@ impl PhysicsWorld {
                 collider_set.insert_with_parent(wheel_collider, wheel_handle, &mut rigid_body_set);
 
                 // Attach wheel to chassis with a revolute joint
-                let joint = RevoluteJointBuilder::new()
+                let mut joint_builder = RevoluteJointBuilder::new()
                     .local_anchor1(point![wheel_x_abs, wheel_y_abs]) // Anchor on chassis
                     .local_anchor2(point![0.0, 0.0]); // Anchor on wheel center
                 
-                impulse_joint_set.insert(chassis_handle, wheel_handle, joint, true);
-
-                if wheel_gene.motor_torque.abs() > 1e-3 { // Check for non-zero torque
-                    active_wheel_motors.push((wheel_handle, wheel_gene.motor_torque));
+                if wheel_gene.motor_torque != 0.0 {
+                    joint_builder = joint_builder
+                        .motor_model(MotorModel::ForceBased)
+                        // Set target velocity very high/low to indicate direction, force is the limit
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0) 
+                        .motor_max_force(wheel_gene.motor_torque.abs());
                 }
+                let joint = joint_builder.build();
+                impulse_joint_set.insert(chassis_handle, wheel_handle, joint, true);
             }
         }
 
         // 3. Run the simulation loop
         let sim_steps = (config.sim_duration_secs / self.integration_parameters.dt).round() as usize;
-        let initial_rb_x_pos = rigid_body_set[chassis_handle].translation().x;
+        let initial_rb_x_pos = rigid_body_set.get(chassis_handle).map_or(0.0, |rb| rb.translation().x);
 
         // Create a fresh physics pipeline just for this evaluation
         let mut physics_pipeline = PhysicsPipeline::new();
 
         for _step in 0..sim_steps {
-            // Apply motor torques
-            for (wheel_body_handle, torque) in &active_wheel_motors {
-                if let Some(wheel_rb_mut) = rigid_body_set.get_mut(*wheel_body_handle) {
-                    // Scale torque to match visualization mode
-                    let scaled_torque = *torque * 0.001 * self.integration_parameters.dt; // Reduced from 0.1 to 0.001
-                    
-                    // Apply the torque with a clamp to prevent instability
-                    let clamped_torque = scaled_torque.clamp(-0.5, 0.5);
-                    wheel_rb_mut.apply_torque_impulse(clamped_torque, true);
-                }
-            }
-
             physics_pipeline.step(
                 &self.gravity,
                 &self.integration_parameters,
@@ -147,11 +142,68 @@ impl PhysicsWorld {
         }
 
         // 4. Calculate fitness
-        let final_rb_x_pos = rigid_body_set[chassis_handle].translation().x;
+        let final_rb_x_pos = rigid_body_set.get(chassis_handle).map_or(initial_rb_x_pos, |rb| rb.translation().x);
         let distance_travelled = final_rb_x_pos - initial_rb_x_pos;
+        let mut fitness = f32::max(distance_travelled, 0.0);
 
-        // Fitness: max horizontal distance in positive direction
-        f32::max(distance_travelled, 0.0)
+        // Fragmentation penalty logic
+        let mut num_missing_parts = 0;
+        for handle in &vehicle_part_handles {
+            if rigid_body_set.get(*handle).is_none() {
+                num_missing_parts += 1;
+            }
+        }
+
+        if num_missing_parts > 0 {
+            // Severe penalty for missing parts
+            println!("Creature lost {} parts! Applying severe penalty.", num_missing_parts);
+            fitness *= 0.01; // Or set to a very small value, or 0
+        } else {
+            // Check for disconnected pieces based on distance between parts
+            // Threshold distance beyond which we consider parts disconnected
+            let distance_threshold = 16.0; // Units as per your requirement
+            
+            // Get positions of all vehicle parts
+            let part_positions: Vec<Vector<f32>> = vehicle_part_handles
+                .iter()
+                .filter_map(|&handle| rigid_body_set.get(handle).map(|rb| rb.translation().clone()))
+                .collect();
+            
+            // Count disconnected pieces using a simple distance-based approach
+            if !part_positions.is_empty() {
+                // Count pieces by checking which parts are too far from any others
+                let mut num_pieces = 0;
+                let mut visited = vec![false; part_positions.len()];
+                
+                for i in 0..part_positions.len() {
+                    if !visited[i] {
+                        num_pieces += 1;
+                        visited[i] = true;
+                        
+                        // Mark all parts that are connected to this one
+                        let mut queue = vec![i];
+                        while let Some(current) = queue.pop() {
+                            for j in 0..part_positions.len() {
+                                if !visited[j] {
+                                    let distance = (part_positions[current] - part_positions[j]).magnitude();
+                                    if distance <= distance_threshold {
+                                        visited[j] = true;
+                                        queue.push(j);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if num_pieces > 1 {
+                    println!("Creature broke into {} pieces! Applying penalty.", num_pieces);
+                    fitness /= num_pieces as f32;
+                }
+            }
+        }
+        
+        fitness
     }
 }
 
@@ -180,7 +232,7 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             sim_duration_secs: 15.0,
-            initial_height_above_ground: 1.0, // To avoid initial collision
+            initial_height_above_ground: 0.25, // Increased from 0.2 for a slight nudge
             gravity: -9.81,
             ground_friction: 1.0, // Increased friction for better traction
             population_size: 50,

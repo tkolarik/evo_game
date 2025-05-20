@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy_rapier2d::prelude::*;
 use bevy_egui::{egui, EguiPlugin, EguiContexts};
 
-use simulation::{PhysicsWorld as HeadlessPhysicsWorld, SimulationConfig, GROUND_Y_POSITION};
+use simulation::{PhysicsWorld as HeadlessPhysicsWorld, SimulationConfig};
 use evolution::EvolutionEngine;
 use visualization::*;
 use phylogeny::write_phylogeny_to_dot_file;
@@ -54,6 +54,44 @@ impl Default for SimulationSpeed {
     }
 }
 
+// Add this resource to store the distance data
+#[derive(Resource, Default)]
+pub struct DistanceComparisonData {
+    pub simulated: Option<f32>,
+    pub visualized: Option<f32>,
+}
+
+// Resource to control simulation state for visualization
+#[derive(Resource)]
+pub struct VisualizationState {
+    pub is_simulating_current_vehicle: bool,
+    pub current_simulation_time: f32,
+    pub show_best_overall: bool, // Flag to show all-time best vs current gen best
+    pub is_physics_paused: bool, // New flag: true to pause Rapier physics during visualization
+    pub single_step_requested: bool, // New flag: true to advance physics by one tick when paused
+    pub use_debug_vehicle: bool, // New flag: true to use a hardcoded debug vehicle
+    // For distance tracking and comparison
+    pub initial_chassis_position: Option<Vec2>,
+    pub expected_fitness: Option<f32>,
+    pub auto_stop_visualization: bool, // New flag: true to automatically stop visualization after sim_duration_secs
+}
+
+impl Default for VisualizationState {
+    fn default() -> Self {
+        Self {
+            is_simulating_current_vehicle: false,
+            current_simulation_time: 0.0,
+            show_best_overall: false,
+            is_physics_paused: false, // Default to not paused
+            single_step_requested: false, // Default to no single step requested
+            use_debug_vehicle: false, // Default to not using debug vehicle
+            initial_chassis_position: None,
+            expected_fitness: None,
+            auto_stop_visualization: true, // Default to auto-stopping for fair comparison
+        }
+    }
+}
+
 fn main() {
     println!("Vehicle Evolution Simulator Initializing...");
 
@@ -85,6 +123,7 @@ fn main() {
         .init_resource::<VisualizationState>()
         .init_resource::<SimulationSpeed>() // Initialize simulation speed resource
         .init_resource::<BatchRunConfig>() // Initialize batch run config
+        .init_resource::<DistanceComparisonData>()
 
         // Configure physics to use fixed timestep for better stability
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0))
@@ -104,6 +143,8 @@ fn main() {
             step_vehicle_visualization_simulation,
             camera_follow_vehicle,
             control_visualization_physics_pause,
+            record_initial_chassis_position,
+            distance_comparison_ui,
         ).run_if(in_state(SimulationMode::Visualizing)))
         .add_systems(OnExit(SimulationMode::Visualizing), (
             despawn_vehicle_parts,
@@ -122,17 +163,21 @@ fn setup_ground_visualization(mut commands: Commands, config: Res<SimulationConf
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.3, 0.6, 0.3), // Brighter green to match screenshot
-                custom_size: Some(Vec2::new(4000.0, 1000.0)), // Much wider and taller ground
+                color: Color::rgb(0.3, 0.6, 0.3),
+                custom_size: Some(Vec2::new(4000.0, 1000.0)),
                 ..default()
             },
-            transform: Transform::from_xyz(0.0, GROUND_Y_POSITION * 100.0 - 500.0, -0.1), // Position below the origin and behind vehicles
+            // This transform will be used by the RigidBody as well.
+            // To make top surface at Y = -0.15, and sprite/collider half-height is 500.0,
+            // center must be at Y = -0.15 - 500.0 = -500.15.
+            // The Z is for visual layering; physics is 2D.
+            transform: Transform::from_xyz(0.0, -500.15, -0.1),
             ..default()
         },
         RigidBody::Fixed,
-        Collider::cuboid(2000.0, 500.0),
-        Friction::coefficient(config.ground_friction), // Match ground friction from SimulationConfig
-        Restitution::coefficient(0.0), // Ground doesn't bounce much, matching headless simulation
+        Collider::cuboid(2000.0, 500.0), // Half-height is 500.0, matches sprite half-height
+        Friction::coefficient(config.ground_friction),
+        Restitution::coefficient(0.0),
         CollisionGroups::new(Group::from_bits_truncate(GROUP_GROUND), Group::from_bits_truncate(GROUND_FILTER)),
         Name::new("Ground"),
     ));
@@ -365,13 +410,47 @@ fn setup_current_vehicle_for_visualization(
     vehicle_parts_query: Query<Entity, With<VehiclePart>>,
     mut rapier_config: ResMut<RapierConfiguration>,
     mut vis_state: ResMut<VisualizationState>,
+    evo_res: Res<EvoResource>,
 ) {
+    vis_state.current_simulation_time = 0.0; // Ensure sim time is reset for all visualizations
     // Reset visualization-specific pause state (is_physics_paused is handled by keyboard_controls for debug mode)
     if !vis_state.use_debug_vehicle {
         vis_state.is_physics_paused = false; 
     }
     // Ensure physics pipeline is active when starting a new visualization
     rapier_config.physics_pipeline_active = true;
+
+    // Reset the initial chassis position - will be set after spawning
+    vis_state.initial_chassis_position = None;
+    
+    // Set the expected fitness value from the individual being visualized if available
+    if let Some(chromosome) = &vis_chromosome.0 {
+        // Find the individual with this chromosome to get its fitness
+        vis_state.expected_fitness = None; // Reset first
+        
+        if !vis_state.use_debug_vehicle {
+            // Search current generation population
+            for individual in &evo_res.1.population.individuals {
+                if individual.chromosome == *chromosome {
+                    vis_state.expected_fitness = Some(individual.fitness);
+                    println!("Expected fitness from simulation: {:.2}", individual.fitness);
+                    break;
+                }
+            }
+            
+            // If not found in current gen, check all-time best
+            if vis_state.expected_fitness.is_none() {
+                if let Some(best) = &evo_res.1.all_time_best_individual {
+                    if best.chromosome == *chromosome {
+                        vis_state.expected_fitness = Some(best.fitness);
+                        println!("Expected fitness from all-time best: {:.2}", best.fitness);
+                    }
+                }
+            }
+        }
+    } else {
+        vis_state.expected_fitness = None;
+    }
 
     for entity in vehicle_parts_query.iter() {
         commands.entity(entity).despawn_recursive();
@@ -389,7 +468,7 @@ fn setup_current_vehicle_for_visualization(
         let debug_wheel_radius = 0.4;
         let debug_wheel_density = 1.0;
         let debug_wheel_friction = 1.0;
-        let debug_motor_torque = 0.0005; // Drastically reduced from 5.0 to 0.5
+        let debug_motor_torque = 0.00000125; // Adjusted from 0.0005 to compensate for scaling changes
 
         // Lower the chassis so the wheel can make contact with the ground
         let initial_chassis_x = 0.0;  // Center horizontally
@@ -472,9 +551,12 @@ fn setup_current_vehicle_for_visualization(
             // Use a revolute joint to allow wheel rotation
             let revolute_joint = RevoluteJointBuilder::new()
                 .local_anchor1(Vec2::new(wheel_x_rel_to_chassis_center, -chassis_half_height - debug_wheel_radius))
-                .local_anchor2(Vec2::ZERO);
+                .local_anchor2(Vec2::ZERO)
+                .motor_model(MotorModel::ForceBased)
+                .motor_velocity(if debug_motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0)
+                .motor_max_force(debug_motor_torque.abs());
                 
-            commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, revolute_joint));
+            commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, revolute_joint.build()));
             
             // Add a visual indicator of wheel rotation (a line from center to edge)
             commands.entity(wheel_entity).with_children(|parent| {
@@ -515,6 +597,7 @@ fn setup_current_vehicle_for_visualization(
             Collider::cuboid(chassis_genes.width / 2.0, chassis_genes.height / 2.0),
             ColliderMassProperties::Density(chassis_genes.density),
             Friction::coefficient(0.7), 
+            Damping { linear_damping: 5.0, angular_damping: 5.0 },
             CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
             ActiveEvents::COLLISION_EVENTS, 
             Name::new("Chassis"),
@@ -545,6 +628,7 @@ fn setup_current_vehicle_for_visualization(
                     ColliderMassProperties::Density(wheel_gene.density), // Added density for gene wheels too
                     Friction::coefficient(wheel_gene.friction_coefficient),
                     Restitution::coefficient(0.1),
+                    Damping { linear_damping: 5.0, angular_damping: 5.0 },
                     CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
                     ExternalImpulse::default(), 
                     Name::new("Wheel"),
@@ -552,11 +636,18 @@ fn setup_current_vehicle_for_visualization(
                     VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
                 )).id();
                 
-                let joint = RevoluteJointBuilder::new()
+                let mut joint_builder = RevoluteJointBuilder::new()
                     .local_anchor1(Vec2::new(wheel_x_abs, wheel_y_abs))
-                    .local_anchor2(Vec2::new(0.0, 0.0)); 
+                    .local_anchor2(Vec2::new(0.0, 0.0));
                 
-                commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, joint));
+                if wheel_gene.motor_torque != 0.0 {
+                    joint_builder = joint_builder
+                        .motor_model(MotorModel::ForceBased)
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0)
+                        .motor_max_force(wheel_gene.motor_torque.abs());
+                }
+                
+                commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, joint_builder.build()));
                 
                 commands.entity(wheel_entity).with_children(|parent| {
                     parent.spawn((
@@ -647,6 +738,17 @@ fn ui_system_info_panel(
             evo_res.1.population.individuals.iter().map(|ind| ind.fitness).sum::<f32>() / evo_res.1.population.individuals.len() as f32
         } else { 0.0 };
         ui.label(format!("Avg Fitness (Current Gen): {:.2}", avg_fitness));
+        ui.separator();
+        
+        // Add visualization time display and auto-stop control
+        if *sim_mode.get() == SimulationMode::Visualizing {
+            ui.label(format!("Visualization Time: {:.2}/{:.2}s", vis_state.current_simulation_time, config.sim_duration_secs));
+            
+            if ui.checkbox(&mut vis_state.auto_stop_visualization, "Auto-stop at Simulation Duration").clicked() {
+                println!("Auto-stop visualization setting changed to: {}", vis_state.auto_stop_visualization);
+            }
+        }
+        
         ui.separator();
         ui.heading("Controls (Keyboard):");
         ui.label("F - Toggle Fast Mode / Pause");
@@ -751,4 +853,139 @@ fn configure_physics(
     rapier_config.physics_pipeline_active = true;
 
     println!("Physics configured with gravity: (0, {})", config.gravity);
+}
+
+// New system to record initial chassis position after spawning
+fn record_initial_chassis_position(
+    mut vis_state: ResMut<VisualizationState>,
+    chassis_query: Query<(&Transform, &Name), With<VehiclePart>>,
+) {
+    // Only run once to capture the initial position
+    if vis_state.is_simulating_current_vehicle && vis_state.initial_chassis_position.is_none() {
+        for (transform, name) in chassis_query.iter() {
+            if name.as_str().contains("Chassis") {
+                let chassis_pos = Vec2::new(transform.translation.x, transform.translation.y);
+                vis_state.initial_chassis_position = Some(chassis_pos);
+                println!("Recorded initial chassis position: ({:.2}, {:.2})", chassis_pos.x, chassis_pos.y);
+                break;
+            }
+        }
+    }
+}
+
+// Update the distance comparison UI to be more prominent
+fn distance_comparison_ui(
+    mut contexts: EguiContexts,
+    distance_data: Res<DistanceComparisonData>,
+    sim_mode: Res<State<SimulationMode>>,
+) {
+    if *sim_mode.get() == SimulationMode::Visualizing { 
+        if let (Some(simulated), Some(visualized)) = (distance_data.simulated, distance_data.visualized) {
+            egui::Window::new("SIMULATION VS VISUALIZATION COMPARISON")
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 20.0])
+                .show(contexts.ctx_mut(), |ui| {
+                    ui.heading("Distance Comparison");
+                    ui.add_space(5.0);
+                    
+                    ui.label(format!("Simulated Distance: {:.2}", simulated));
+                    ui.label(format!("Visualized Distance: {:.2}", visualized));
+                    
+                    let delta = visualized - simulated;
+                    let delta_percent = if simulated != 0.0 { (delta / simulated) * 100.0 } else { 0.0 };
+                    
+                    ui.separator();
+                    ui.label(format!("Delta: {:.2} ({:.1}%)", delta, delta_percent));
+                    
+                    if delta.abs() / simulated > 0.1 && simulated > 1.0 {
+                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), 
+                            "⚠️ WARNING: Large discrepancy between simulation and visualization!");
+                    }
+                });
+        }
+    }
+}
+
+// System to step vehicle visualization simulation - Update this function
+fn step_vehicle_visualization_simulation(
+    mut vis_state: ResMut<VisualizationState>,
+    config: Res<SimulationConfig>,
+    time: Res<Time<Fixed>>,
+    mut wheel_query: Query<(&VisualizedWheel, &mut ExternalImpulse, &Transform)>,
+    chassis_query: Query<(Entity, &Transform), (With<VehiclePart>, Without<VisualizedWheel>)>, // Modified to get Entity + Transform
+    all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Added &Transform for logging
+    _next_sim_mode: ResMut<NextState<SimulationMode>>,
+    mut distance_data: ResMut<DistanceComparisonData>,
+) {
+    // Only log if physics is not paused (includes both normal running and single step)
+    if vis_state.is_simulating_current_vehicle && (!vis_state.is_physics_paused || vis_state.single_step_requested) {
+        println!("--- step_vehicle_visualization_simulation SYSTEM CALLED ---"); // DEBUG PRINT
+
+        // Log all existing wheels and chassis transforms at the start of this system's execution
+        println!("=== PHYSICS STATE ===");
+        
+        // Log chassis position
+        for (entity, transform) in chassis_query.iter() {
+            println!("Chassis entity {entity:?}, Transform: {}", transform.translation);
+        }
+        
+        let collected_wheels: Vec<_> = all_visualized_wheels_query.iter().collect();
+        println!("Logging all collected wheels ({}): ", collected_wheels.len());
+        for (entity, name, transform) in collected_wheels.iter() {
+            println!("Wheel entity {entity:?} with name: {}, Transform: {}", name, transform.translation);
+        }
+        println!("=== END PHYSICS STATE ===");
+    }
+    
+    if vis_state.is_simulating_current_vehicle {
+        // Only increment simulation time if physics is not paused or we're doing a single step
+        if !vis_state.is_physics_paused || vis_state.single_step_requested {
+            // Torque application to wheels is now handled by joint motors, so this loop is removed.
+            // for (wheel, mut impulse, _transform) in wheel_query.iter_mut() {
+            //     // Apply impulse scaled by time delta
+            //     let scaled_torque = wheel.motor_gene_torque * time.delta_seconds();
+            //     
+            //     // Clear any existing impulse to prevent accumulation
+            //     impulse.torque_impulse = 0.0;
+            //     
+            //     // Apply the torque directly - no clamping, rely on gene limits instead
+            //     impulse.torque_impulse += scaled_torque;
+            // }
+            
+            // Increment simulation time if physics is running
+            vis_state.current_simulation_time += time.delta_seconds();
+            
+            // Check if we should auto-stop the visualization
+            if vis_state.auto_stop_visualization && vis_state.current_simulation_time >= config.sim_duration_secs {
+                // Stop the visualization and display comparison
+                println!("AUTO-STOP: Visualization reached {} seconds (matching simulation duration)", config.sim_duration_secs);
+                
+                // Calculate and update distance data
+                let mut chassis_pos = None;
+                for (_, transform) in chassis_query.iter() {
+                    chassis_pos = Some(Vec2::new(transform.translation.x, transform.translation.y));
+                    break;
+                }
+                
+                if let (Some(initial_pos), Some(current_pos), Some(expected)) = (vis_state.initial_chassis_position, chassis_pos, vis_state.expected_fitness) {
+                    let visualized_distance = current_pos.x - initial_pos.x;
+                    let delta = visualized_distance - expected;
+                    let delta_percent = if expected != 0.0 { (delta / expected) * 100.0 } else { 0.0 };
+                    
+                    println!("----------------------------------------------------");
+                    println!("SIMULATION VS VISUALIZATION COMPARISON");
+                    println!("Simulated Distance: {:.2}", expected);
+                    println!("Visualized Distance: {:.2}", visualized_distance);
+                    println!("Delta: {:.2} ({:.1}%)", delta, delta_percent);
+                    println!("----------------------------------------------------");
+                    
+                    // Update the distance comparison data resource for UI display
+                    distance_data.simulated = Some(expected);
+                    distance_data.visualized = Some(visualized_distance);
+                }
+                
+                // Pause the physics but stay in visualization mode
+                vis_state.is_physics_paused = true;
+            }
+        }
+    }
 } 

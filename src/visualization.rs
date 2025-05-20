@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_rapier2d::prelude::*;
-use crate::organism::Chromosome;
+use crate::organism::*;
+use crate::DistanceComparisonData;
 use crate::simulation::SimulationConfig;
 
 // Marker component for the main camera
@@ -30,6 +31,9 @@ pub struct VisualizationState {
     pub is_physics_paused: bool, // New flag: true to pause Rapier physics during visualization
     pub single_step_requested: bool, // New flag: true to advance physics by one tick when paused
     pub use_debug_vehicle: bool, // New flag: true to use a hardcoded debug vehicle
+    // For distance tracking and comparison
+    pub initial_chassis_position: Option<Vec2>,
+    pub expected_fitness: Option<f32>,
     // Add other state controls like simulation speed factor
 }
 
@@ -42,6 +46,8 @@ impl Default for VisualizationState {
             is_physics_paused: false, // Default to not paused
             single_step_requested: false, // Default to no single step requested
             use_debug_vehicle: false, // Default to not using debug vehicle
+            initial_chassis_position: None,
+            expected_fitness: None,
         }
     }
 }
@@ -77,7 +83,7 @@ pub fn despawn_vehicle_parts(
 // This will be expanded significantly
 pub fn spawn_vehicle_visualization(
     mut commands: Commands,
-    config: Res<SimulationConfig>,
+    _config: Res<SimulationConfig>,
     chromosome_res: Res<CurrentVehicleChromosome>,
     _rapier_config: ResMut<RapierConfiguration>, // Prefix with underscore to suppress warning
 ) {
@@ -90,7 +96,7 @@ pub fn spawn_vehicle_visualization(
         // Actual vehicle spawning from chromosome will be more complex, mirroring PhysicsWorld logic
         // but using Bevy entities and Rapier components.
         
-        let initial_chassis_y = config.initial_height_above_ground + chromosome.chassis.height / 2.0;
+        let initial_chassis_y = _config.initial_height_above_ground + chromosome.chassis.height / 2.0;
 
         commands.spawn((
             SpriteBundle {
@@ -125,7 +131,7 @@ pub fn ui_system(
 // System to run one step of the visualized simulation
 pub fn step_vehicle_visualization_simulation(
     mut vis_state: ResMut<VisualizationState>,
-    config: Res<SimulationConfig>,
+    _config: Res<SimulationConfig>,
     time: Res<Time>,
     mut wheel_query: Query<(&VisualizedWheel, &mut ExternalImpulse, &Transform)>,
     chassis_query: Query<(Entity, &Transform), (With<VehiclePart>, Without<VisualizedWheel>)>, // Modified to get Entity + Transform
@@ -153,17 +159,14 @@ pub fn step_vehicle_visualization_simulation(
         if !vis_state.is_physics_paused || vis_state.single_step_requested {
             // Apply a small constant torque to wheels, based on wheel genes
             for (wheel, mut impulse, _transform) in wheel_query.iter_mut() {
-                // Apply a very gentle impulse scaled by time delta
-                let scaled_torque = wheel.motor_gene_torque * time.delta_seconds() * 0.001;
+                // Apply torque scaled by time delta (no additional scaling)
+                let scaled_torque = wheel.motor_gene_torque * time.delta_seconds();
                 
                 // Clear any existing impulse to prevent accumulation
                 impulse.torque_impulse = 0.0;
                 
-                // Apply the new torque
+                // Apply the torque directly - no clamping, rely on gene limits instead
                 impulse.torque_impulse += scaled_torque;
-                
-                // Add safeguard to limit max torque
-                impulse.torque_impulse = impulse.torque_impulse.clamp(-0.5, 0.5);
             }
             
             // Increment simulation time if physics is running
@@ -174,24 +177,102 @@ pub fn step_vehicle_visualization_simulation(
 
 // System to make the camera follow the visualized vehicle
 pub fn camera_follow_vehicle(
-    mut camera_query: Query<&mut Transform, (With<MainCamera>, Without<VehiclePart>)>, // Camera should not be a vehicle part
-    vehicle_parts_query: Query<&Transform, With<VehiclePart>>, // Query for transforms of all vehicle parts
+    mut camera_query: Query<(&mut Transform, &mut OrthographicProjection), (With<MainCamera>, Without<VehiclePart>)>,
+    vehicle_parts_query: Query<(&Transform, Option<&Name>), With<VehiclePart>>,
 ) {
-    if let Ok(mut camera_transform) = camera_query.get_single_mut() {
+    if let Ok((mut camera_transform, mut projection)) = camera_query.get_single_mut() {
+        // Find the farthest x position and the center of mass (chassis)
         let mut farthest_x = f32::NEG_INFINITY;
-        let mut target_transform: Option<&Transform> = None;
-
-        for part_transform in vehicle_parts_query.iter() {
+        let mut chassis_pos = Vec2::ZERO;
+        let mut chassis_found = false;
+        
+        // First pass to find chassis by name
+        for (part_transform, name) in vehicle_parts_query.iter() {
+            // Try to identify chassis by name (or use first entity as fallback)
+            if !chassis_found {
+                if let Some(name) = name {
+                    if name.as_str().contains("Chassis") {
+                        chassis_pos = Vec2::new(part_transform.translation.x, part_transform.translation.y);
+                        chassis_found = true;
+                    }
+                } else {
+                    // Fallback: use first entity if no name found
+                    chassis_pos = Vec2::new(part_transform.translation.x, part_transform.translation.y);
+                    chassis_found = true;
+                }
+            }
+            
+            // Track farthest piece
             if part_transform.translation.x > farthest_x {
                 farthest_x = part_transform.translation.x;
-                target_transform = Some(part_transform);
             }
         }
+        
+        if chassis_found {
+            // Calculate the midpoint between chassis and farthest piece
+            let midpoint_x = (chassis_pos.x + farthest_x) / 2.0;
+            
+            // Position camera at the midpoint
+            camera_transform.translation.x = midpoint_x;
+            camera_transform.translation.y = chassis_pos.y;
+            
+            // Calculate the distance between chassis and farthest piece to determine zoom
+            let distance = (farthest_x - chassis_pos.x).abs();
+            
+            // Adjust zoom level based on distance (with min/max limits)
+            if distance > 5.0 {
+                // The larger the distance, the more we need to zoom out (larger scale)
+                let desired_scale = (distance / 15.0).max(0.03).min(0.2);
+                // Smooth the scale transition
+                projection.scale = projection.scale * 0.9 + desired_scale * 0.1;
+            } else {
+                // Default zoom for normal scenarios
+                projection.scale = projection.scale * 0.9 + 0.03 * 0.1;
+            }
+        }
+    }
+}
 
-        if let Some(tt) = target_transform {
-            camera_transform.translation.x = tt.translation.x;
-            camera_transform.translation.y = tt.translation.y;
-            // Keep camera_transform.translation.z the same as its initial Z
+// New system to track and compare distances
+pub fn track_vehicle_distance(
+    time: Res<Time>,
+    vis_state: Res<VisualizationState>,
+    chassis_query: Query<(&Transform, &Name), With<VehiclePart>>,
+    mut distance_data: ResMut<DistanceComparisonData>,
+) {
+    // Only check every ~2 seconds to avoid spamming the console
+    if !vis_state.is_simulating_current_vehicle || 
+       vis_state.expected_fitness.is_none() {
+        return;
+    }
+    
+    // Find the chassis by name
+    for (transform, name) in chassis_query.iter() {
+        if name.as_str().contains("Chassis") {
+            if let (Some(initial_pos), Some(expected)) = (vis_state.initial_chassis_position, vis_state.expected_fitness) {
+                let current_pos = Vec2::new(transform.translation.x, transform.translation.y);
+                
+                // The simulation and visualization coordinate systems differ by their initial position
+                // So we need to measure from the initial position in the visualization
+                let visualized_distance = current_pos.x - initial_pos.x;
+                
+                // Compare with the expected distance from simulation
+                let delta = visualized_distance - expected;
+                let delta_percent = if expected != 0.0 { (delta / expected) * 100.0 } else { 0.0 };
+                
+                // Update the distance comparison data resource for UI display
+                distance_data.simulated = Some(expected);
+                distance_data.visualized = Some(visualized_distance);
+                
+                // Only log every ~2 seconds to avoid spamming the console
+                if time.elapsed_seconds() % 2.0 < 0.1 {
+                    println!(
+                        "Distance check at t={:.1}s: Simulated={:.2}, Visualized={:.2}, Delta={:.2} ({:.1}%)",
+                        vis_state.current_simulation_time, expected, visualized_distance, delta, delta_percent
+                    );
+                }
+            }
+            break; // Only need to check the first chassis found
         }
     }
 } 

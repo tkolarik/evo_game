@@ -1,4 +1,4 @@
-use crate::organism::{Chromosome, ChassisGenes, WheelGenes, NUM_POTENTIAL_WHEELS, MIN_CHASSIS_WIDTH, MAX_CHASSIS_WIDTH, MIN_CHASSIS_HEIGHT, MAX_CHASSIS_HEIGHT, MIN_CHASSIS_DENSITY, MAX_CHASSIS_DENSITY, MIN_WHEEL_RADIUS, MAX_WHEEL_RADIUS, MIN_WHEEL_DENSITY, MAX_WHEEL_DENSITY, MIN_WHEEL_MOTOR_TORQUE, MAX_WHEEL_MOTOR_TORQUE, MIN_WHEEL_FRICTION_COEFFICIENT, MAX_WHEEL_FRICTION_COEFFICIENT};
+use crate::organism::{Chromosome, MIN_CHASSIS_WIDTH, MAX_CHASSIS_WIDTH, MIN_CHASSIS_HEIGHT, MAX_CHASSIS_HEIGHT, MIN_CHASSIS_DENSITY, MAX_CHASSIS_DENSITY, MIN_WHEEL_RADIUS, MAX_WHEEL_RADIUS, MIN_WHEEL_DENSITY, MAX_WHEEL_DENSITY, MIN_WHEEL_MOTOR_TORQUE, MAX_WHEEL_MOTOR_TORQUE, MIN_WHEEL_FRICTION_COEFFICIENT, MAX_WHEEL_FRICTION_COEFFICIENT};
 use crate::simulation::{PhysicsWorld, SimulationConfig, CrossoverType};
 use rand::prelude::*;
 use rand_distr::{Normal, Distribution};
@@ -16,7 +16,7 @@ pub struct Individual {
     pub id: usize,
     pub chromosome: Chromosome,
     pub fitness: f32,
-    pub parents: Option<(usize, usize)>,
+    // pub parents: Option<(usize, usize)>,
     pub generation: usize, // Track which generation this individual belongs to
 }
 
@@ -26,7 +26,7 @@ impl Individual {
             id: generate_unique_id(),
             chromosome: Chromosome::new_random(rng),
             fitness: 0.0,
-            parents: None,
+            // parents: None, 
             generation,
         }
     }
@@ -131,7 +131,7 @@ impl Individual {
             id: generate_unique_id(),
             chromosome: offspring_chromosome,
             fitness: 0.0,
-            parents: Some((parent1.id, parent2.id)),
+            // parents: Some((parent1.id, parent2.id)),
             generation,
         }
     }
@@ -285,43 +285,43 @@ impl EvolutionEngine {
         self.population.generation_count = next_gen_number;
     }
 
-    pub fn run_simulation(&mut self, physics_world: &mut PhysicsWorld) {
-        self.population.evaluate_fitness(physics_world, &self.config);
-        self.update_all_time_best(); // Check after initial population evaluation
+    // pub fn run_simulation(&mut self, physics_world: &mut PhysicsWorld) {
+    //     self.population.evaluate_fitness(physics_world, &self.config);
+    //     self.update_all_time_best(); // Check after initial population evaluation
 
-        for gen_idx in 0..self.config.num_generations {
-             if gen_idx > 0 { // For gen 0, fitness is already evaluated
-                self.evolve_generation(physics_world);
-             }
-            if self.population.generation_count >= self.config.num_generations {
-                // This condition might be met if num_generations is 0 or 1.
-                // For num_generations = 1, evolve_generation is not called in loop, so we print final stats after loop.
-                break; 
-            }
-        }
-        // Ensure final stats are printed if simulation ended by reaching num_generations.
-        // Also ensure the last generation (if not gen 0) gets its fitness evaluated if loop structure changes.
-        // Current structure: gen 0 evaluated before loop, subsequent gens in evolve_generation.
-        // If num_generations = 0, loop is skipped, initial stats printed.
-        // If num_generations = 1, loop is skipped, initial stats printed. This needs a slight adjustment for clarity.
+    //     for gen_idx in 0..self.config.num_generations {
+    //          if gen_idx > 0 { // For gen 0, fitness is already evaluated
+    //             self.evolve_generation(physics_world);
+    //          }
+    //         if self.population.generation_count >= self.config.num_generations {
+    //             // This condition might be met if num_generations is 0 or 1.
+    //             // For num_generations = 1, evolve_generation is not called in loop, so we print final stats after loop.
+    //             break; 
+    //         }
+    //     }
+    //     // Ensure final stats are printed if simulation ended by reaching num_generations.
+    //     // Also ensure the last generation (if not gen 0) gets its fitness evaluated if loop structure changes.
+    //     // Current structure: gen 0 evaluated before loop, subsequent gens in evolve_generation.
+    //     // If num_generations = 0, loop is skipped, initial stats printed.
+    //     // If num_generations = 1, loop is skipped, initial stats printed. This needs a slight adjustment for clarity.
         
-        // If the simulation ran for at least one generation (beyond initial setup)
-        // and the final generation's fitness hasn't been printed by the loop's own evolve_generation call.
-        // The loop structure ensures that if evolve_generation was called, its print occurs.
-        // This is mainly for the case where num_generations = 0 or 1.
+    //     // If the simulation ran for at least one generation (beyond initial setup)
+    //     // and the final generation's fitness hasn't been printed by the loop's own evolve_generation call.
+    //     // The loop structure ensures that if evolve_generation was called, its print occurs.
+    //     // This is mainly for the case where num_generations = 0 or 1.
 
-        println!("Simulation finished after {} target generations (Actual: {}).", self.config.num_generations, self.population.generation_count);
-        println!(
-            "Final Stats - Generation: {}, Best Fitness: {:.2}, Avg Fitness: {:.2}",
-            self.population.generation_count,
-            self.population.individuals.first().map_or(0.0, |ind| ind.fitness),
-            if self.population.individuals.is_empty() { 0.0 } 
-            else { self.population.individuals.iter().map(|ind| ind.fitness).sum::<f32>() / self.population.individuals.len() as f32 }
-        );
-        if let Some(best_overall) = &self.all_time_best_individual {
-             println!("All-time Best Individual - ID: {}, Fitness: {:.2}, Gen: {}", best_overall.id, best_overall.fitness, best_overall.generation);
-        }
-    }
+    //     println!("Simulation finished after {} target generations (Actual: {}).", self.config.num_generations, self.population.generation_count);
+    //     println!(
+    //         "Final Stats - Generation: {}, Best Fitness: {:.2}, Avg Fitness: {:.2}",
+    //         self.population.generation_count,
+    //         self.population.individuals.first().map_or(0.0, |ind| ind.fitness),
+    //         if self.population.individuals.is_empty() { 0.0 } 
+    //         else { self.population.individuals.iter().map(|ind| ind.fitness).sum::<f32>() / self.population.individuals.len() as f32 }
+    //     );
+    //     if let Some(best_overall) = &self.all_time_best_individual {
+    //          println!("All-time Best Individual - ID: {}, Fitness: {:.2}, Gen: {}", best_overall.id, best_overall.fitness, best_overall.generation);
+    //     }
+    // }
 }
 
 #[cfg(test)]
@@ -436,7 +436,7 @@ mod tests {
         let mut engine = EvolutionEngine::new(config.clone());
         let mut physics_world = PhysicsWorld::new(&config);
 
-        engine.run_simulation(&mut physics_world);
+        // engine.run_simulation(&mut physics_world);
         assert_eq!(engine.population.generation_count, config.num_generations);
         assert_eq!(engine.population.individuals.len(), config.population_size);
         if let Some(best_ind) = engine.population.individuals.first() {

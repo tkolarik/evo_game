@@ -3,8 +3,8 @@ use crate::simulation::SimulationConfig; // Potentially for labels
 use std::fs::File;
 use std::io::Write;
 
-pub type PhylogenyNode = usize; // Individual ID
-pub type PhylogenyEdge = (usize, usize); // (ParentID, ChildID)
+// pub type PhylogenyNode = usize; // Individual ID
+// pub type PhylogenyEdge = (usize, usize); // (ParentID, ChildID)
 
 // Generates a DOT language string for the phylogeny tree
 pub fn generate_dot_string(engine: &EvolutionEngine, _config: &SimulationConfig) -> String {
