@@ -16,9 +16,13 @@ const GROUND_THICKNESS: f32 = 0.1;
 
 impl PhysicsWorld {
     pub fn new(config: &SimulationConfig) -> Self {
+        // Create integration parameters that match Bevy's integration more closely
+        let mut integration_params = IntegrationParameters::default();
+        integration_params.dt = 1.0 / 60.0; // Match the fixed timestep used in visualization
+        
         Self {
             gravity: vector![0.0, config.gravity],
-            integration_parameters: IntegrationParameters::default(),
+            integration_parameters: integration_params,
             ground_friction: config.ground_friction,
             ground_restitution: 0.0, // Ground doesn't bounce much
         }
@@ -53,9 +57,11 @@ impl PhysicsWorld {
         let initial_chassis_x = 0.0;
         let initial_chassis_y = config.initial_height_above_ground + chromosome.chassis.height / 2.0;
 
-        // Create chassis
+        // Create chassis with more damping to match visualization
         let chassis_rigid_body = RigidBodyBuilder::dynamic()
             .translation(vector![initial_chassis_x, initial_chassis_y])
+            .linear_damping(5.0)
+            .angular_damping(5.0)
             .build();
         let chassis_handle = rigid_body_set.insert(chassis_rigid_body);
         
@@ -78,6 +84,8 @@ impl PhysicsWorld {
                         initial_chassis_x + wheel_x_abs,
                         initial_chassis_y + wheel_y_abs
                     ])
+                    .linear_damping(5.0)
+                    .angular_damping(5.0)
                     .build();
                 let wheel_handle = rigid_body_set.insert(wheel_rb);
                 
@@ -112,7 +120,12 @@ impl PhysicsWorld {
             // Apply motor torques
             for (wheel_body_handle, torque) in &active_wheel_motors {
                 if let Some(wheel_rb_mut) = rigid_body_set.get_mut(*wheel_body_handle) {
-                    wheel_rb_mut.apply_torque_impulse(*torque * self.integration_parameters.dt, true);
+                    // Scale torque to match visualization mode
+                    let scaled_torque = *torque * 0.001 * self.integration_parameters.dt; // Reduced from 0.1 to 0.001
+                    
+                    // Apply the torque with a clamp to prevent instability
+                    let clamped_torque = scaled_torque.clamp(-0.5, 0.5);
+                    wheel_rb_mut.apply_torque_impulse(clamped_torque, true);
                 }
             }
 

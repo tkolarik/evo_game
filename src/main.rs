@@ -13,6 +13,14 @@ use evolution::EvolutionEngine;
 use visualization::*;
 use phylogeny::write_phylogeny_to_dot_file;
 
+// --- Collision Groups ---
+const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
+const GROUP_GROUND: u32 = 1 << 1;  // 0b00000010
+// Add more groups as needed, e.g., GROUP_OBSTACLE = 1 << 2;
+
+const VEHICLE_FILTER: u32 = GROUP_GROUND; // Vehicles collide with ground
+const GROUND_FILTER: u32 = GROUP_VEHICLE;   // Ground collides with vehicles
+
 // --- Bevy App Setup ---
 
 // Resource to manage the main evolution engine
@@ -78,9 +86,13 @@ fn main() {
         .init_resource::<SimulationSpeed>() // Initialize simulation speed resource
         .init_resource::<BatchRunConfig>() // Initialize batch run config
 
+        // Configure physics to use fixed timestep for better stability
+        .insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0))
+
         // Startup Systems
         .add_systems(Startup, setup_graphics)
         .add_systems(Startup, setup_ground_visualization) // Add a visual ground
+        .add_systems(Startup, configure_physics) // Configure physics to match headless simulation
 
         // Systems for controlling simulation flow and visualization
         .add_systems(Update, keyboard_controls)
@@ -88,8 +100,15 @@ fn main() {
         
         // Systems for visualization mode
         .add_systems(OnEnter(SimulationMode::Visualizing), setup_current_vehicle_for_visualization)
-        .add_systems(Update, step_vehicle_visualization_simulation.run_if(in_state(SimulationMode::Visualizing)))
-        .add_systems(OnExit(SimulationMode::Visualizing), despawn_vehicle_parts)
+        .add_systems(Update, (
+            step_vehicle_visualization_simulation,
+            camera_follow_vehicle,
+            control_visualization_physics_pause,
+        ).run_if(in_state(SimulationMode::Visualizing)))
+        .add_systems(OnExit(SimulationMode::Visualizing), (
+            despawn_vehicle_parts,
+            ensure_physics_active_on_exit_visualization,
+        ))
         
         // UI System (placeholder)
         .add_systems(Update, ui_system_info_panel)
@@ -98,20 +117,26 @@ fn main() {
         .run();
 }
 
-fn setup_ground_visualization(mut commands: Commands) {
+fn setup_ground_visualization(mut commands: Commands, config: Res<SimulationConfig>) {
+    // Create a more noticeable ground that matches the screenshot
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.3, 0.5, 0.3),
-                custom_size: Some(Vec2::new(2000.0, 20.0)),
+                color: Color::rgb(0.3, 0.6, 0.3), // Brighter green to match screenshot
+                custom_size: Some(Vec2::new(4000.0, 1000.0)), // Much wider and taller ground
                 ..default()
             },
-            transform: Transform::from_xyz(0.0, GROUND_Y_POSITION * 100.0 - 10.0 , 0.0),
+            transform: Transform::from_xyz(0.0, GROUND_Y_POSITION * 100.0 - 500.0, -0.1), // Position below the origin and behind vehicles
             ..default()
         },
         RigidBody::Fixed,
-        Collider::cuboid(1000.0, 10.0),
+        Collider::cuboid(2000.0, 500.0),
+        Friction::coefficient(config.ground_friction), // Match ground friction from SimulationConfig
+        Restitution::coefficient(0.0), // Ground doesn't bounce much, matching headless simulation
+        CollisionGroups::new(Group::from_bits_truncate(GROUP_GROUND), Group::from_bits_truncate(GROUND_FILTER)),
+        Name::new("Ground"),
     ));
+    println!("Ground created with friction coefficient: {}", config.ground_friction);
 }
 
 fn keyboard_controls(
@@ -122,8 +147,10 @@ fn keyboard_controls(
     config: Res<SimulationConfig>,
     mut vis_chromosome: ResMut<CurrentVehicleChromosome>,
     mut vis_state: ResMut<VisualizationState>,
-    mut batch_run_config: ResMut<BatchRunConfig>, // Added for resetting on manual mode changes
+    mut batch_run_config: ResMut<BatchRunConfig>,
 ) {
+    let shift_pressed = keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight);
+
     if keyboard_input.just_pressed(KeyCode::F) {
         if *current_sim_mode.get() != SimulationMode::RunningFast {
             println!("Switching to RunningFast mode (continuous).");
@@ -136,20 +163,41 @@ fn keyboard_controls(
         }
     }
 
-    if keyboard_input.just_pressed(KeyCode::V) { // Visualize best of current generation
-        if *current_sim_mode.get() != SimulationMode::Visualizing {
-            if let Some(best_current) = evo_res.1.population.individuals.first() {
-                println!("Preparing to visualize best of current generation (ID: {}).", best_current.id);
-                vis_chromosome.0 = Some(best_current.chromosome.clone());
-                vis_state.is_simulating_current_vehicle = true; // Start simulation immediately
-                vis_state.current_simulation_time = 0.0;
-                next_sim_mode.set(SimulationMode::Visualizing);
+    if keyboard_input.just_pressed(KeyCode::V) {
+        if shift_pressed { // Shift + V: Load best of current gen and PAUSE
+            if *current_sim_mode.get() == SimulationMode::Paused {
+                if let Some(best_current) = evo_res.1.population.individuals.first() {
+                    println!("Shift+V: Loading best of current generation (ID: {}) and PAUSING physics.", best_current.id);
+                    vis_chromosome.0 = Some(best_current.chromosome.clone());
+                    vis_state.is_simulating_current_vehicle = true;
+                    vis_state.current_simulation_time = 0.0;
+                    vis_state.is_physics_paused = true; // Explicitly pause physics
+                    vis_state.single_step_requested = false; // Clear any pending step
+                    vis_state.use_debug_vehicle = false; // Ensure debug vehicle is off
+                    next_sim_mode.set(SimulationMode::Visualizing);
+                } else {
+                    println!("Shift+V: No individuals in population to visualize.");
+                }
             } else {
-                println!("No individuals in population to visualize.");
+                println!("Shift+V: Can only load paused visualization from main Paused mode.");
             }
-        } else {
-             println!("Switching to Paused mode from Visualizing.");
-            next_sim_mode.set(SimulationMode::Paused);
+        } else { // Just V: Visualize best of current generation (and play)
+            if *current_sim_mode.get() != SimulationMode::Visualizing {
+                if let Some(best_current) = evo_res.1.population.individuals.first() {
+                    println!("V: Preparing to visualize best of current generation (ID: {}).", best_current.id);
+                    vis_chromosome.0 = Some(best_current.chromosome.clone());
+                    vis_state.is_simulating_current_vehicle = true;
+                    vis_state.current_simulation_time = 0.0;
+                    vis_state.use_debug_vehicle = false; // Ensure debug vehicle is off
+                    // vis_state.is_physics_paused will be false by default via setup_current_vehicle_for_visualization
+                    next_sim_mode.set(SimulationMode::Visualizing);
+                } else {
+                    println!("V: No individuals in population to visualize.");
+                }
+            } else {
+                 println!("V: Switching to Paused mode from Visualizing.");
+                next_sim_mode.set(SimulationMode::Paused);
+            }
         }
     }
     
@@ -193,10 +241,66 @@ fn keyboard_controls(
                 batch_run_config.generations_completed_this_batch = 0;
                 next_sim_mode.set(SimulationMode::RunningFast);
             }
-            _ => {
-                println!("Pausing simulation.");
+            _ => { // Includes Visualizing and RunningFast
+                println!("Pausing simulation via Space bar (next_sim_mode set to Paused).");
+                // If in visualizing, this will exit visualizing. If user wants to pause *within* visualizing, use K.
                 next_sim_mode.set(SimulationMode::Paused);
             }
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::K) { // New keybind for pausing visualization physics
+        if *current_sim_mode.get() == SimulationMode::Visualizing {
+            vis_state.is_physics_paused = !vis_state.is_physics_paused;
+            if vis_state.is_physics_paused {
+                println!("Visualization physics PAUSED.");
+            } else {
+                println!("Visualization physics RESUMED.");
+                vis_state.single_step_requested = false; // Ensure no pending single step when resuming play
+            }
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::N) { // New keybind for single physics step
+        if *current_sim_mode.get() == SimulationMode::Visualizing && vis_state.is_physics_paused {
+            vis_state.single_step_requested = true;
+            println!("Visualization physics: Single step requested.");
+        } else if *current_sim_mode.get() == SimulationMode::Visualizing && !vis_state.is_physics_paused {
+            println!("Press 'K' to pause visualization physics before single stepping with 'N'.");
+        } else {
+            // N does nothing if not in visualizing mode
+        }
+    }
+
+    if keyboard_input.just_pressed(KeyCode::D) { // Keybind for Debug Vehicle Visualization
+        if *current_sim_mode.get() == SimulationMode::Visualizing && vis_state.use_debug_vehicle {
+            // If already visualizing debug vehicle, switch to Paused mode
+            println!("D: Exiting debug vehicle visualization. Switching to Paused mode.");
+            vis_state.use_debug_vehicle = false;
+            vis_state.is_simulating_current_vehicle = false; // Ensure regular simulation stops
+            next_sim_mode.set(SimulationMode::Paused);
+        } else if *current_sim_mode.get() == SimulationMode::Paused { // Allow starting debug from Paused
+            // If paused, switch to visualizing debug vehicle
+            println!("D: Enabling debug vehicle visualization. STARTING PAUSED - PRESS 'N' TO STEP.");
+            vis_chromosome.0 = None; // Clear any selected chromosome
+            vis_state.use_debug_vehicle = true;
+            vis_state.is_simulating_current_vehicle = true; // Enable simulation logic for visualization
+            vis_state.current_simulation_time = 0.0;
+            vis_state.is_physics_paused = true; // Start paused
+            vis_state.single_step_requested = false;
+            next_sim_mode.set(SimulationMode::Visualizing);
+        } else if *current_sim_mode.get() == SimulationMode::Visualizing && !vis_state.use_debug_vehicle {
+            // If in normal visualization, switch to debug visualization (paused)
+            println!("D: Switching from normal to DEBUG vehicle visualization. STARTING PAUSED - PRESS 'N' TO STEP.");
+            vis_chromosome.0 = None; // Clear any selected chromosome
+            vis_state.use_debug_vehicle = true;
+            vis_state.is_simulating_current_vehicle = true; // Re-ensure this, though should be true
+            vis_state.current_simulation_time = 0.0; // Reset time
+            vis_state.is_physics_paused = true; // Pause physics
+            vis_state.single_step_requested = false;
+            // next_sim_mode.set(SimulationMode::Visualizing); // Already in this mode, but ensures OnEnter logic if it were different
+        } else {
+            println!("D: Press D from Paused mode to start debug vehicle, or again if already in debug viz to exit. Or from normal viz to switch to debug viz.");
         }
     }
 }
@@ -259,21 +363,143 @@ fn setup_current_vehicle_for_visualization(
     vis_chromosome: Res<CurrentVehicleChromosome>,
     config: Res<SimulationConfig>,
     vehicle_parts_query: Query<Entity, With<VehiclePart>>,
-    mut rapier_config: ResMut<RapierConfiguration> // Changed to use RapierConfiguration
+    mut rapier_config: ResMut<RapierConfiguration>,
+    mut vis_state: ResMut<VisualizationState>,
 ) {
+    // Reset visualization-specific pause state (is_physics_paused is handled by keyboard_controls for debug mode)
+    if !vis_state.use_debug_vehicle {
+        vis_state.is_physics_paused = false; 
+    }
+    // Ensure physics pipeline is active when starting a new visualization
+    rapier_config.physics_pipeline_active = true;
+
     for entity in vehicle_parts_query.iter() {
         commands.entity(entity).despawn_recursive();
     }
-    // Reset Rapier context if necessary (e.g. clear bodies, though despawning should handle most)
-    // This might not be needed if OnExit(Visualizing) and despawn_vehicle_parts works perfectly
-    // and RapierPhysicsPlugin correctly handles removed entities.
 
-    if let Some(chromosome) = &vis_chromosome.0 {
+    // Ensure gravity is set for the visual simulation
+    rapier_config.gravity = Vec2::new(0.0, config.gravity);
+
+    if vis_state.use_debug_vehicle {
+        println!("Spawning DEBUG vehicle.");
+        // Build a vehicle from hard-coded parameter for debugging
+        let chassis_width = 2.0;
+        let chassis_height = 1.0;
+        let chassis_half_height = chassis_height / 2.0;
+        let debug_wheel_radius = 0.4;
+        let debug_wheel_density = 1.0;
+        let debug_wheel_friction = 1.0;
+        let debug_motor_torque = 0.0005; // Drastically reduced from 5.0 to 0.5
+
+        // Lower the chassis so the wheel can make contact with the ground
+        let initial_chassis_x = 0.0;  // Center horizontally
+        let initial_chassis_y = 0.2 + chassis_half_height;  // Just above the ground to ensure wheel contact
+        
+        // Position the wheel on the left side, closer to the ground
+        let wheel_x_rel_to_chassis_center = -0.6; // Left side of chassis
+        
+        let debug_wheels_data = vec![
+            wheel_x_rel_to_chassis_center,  // Left wheel position
+        ];
+
+        // Create chassis
+        let chassis_entity = commands.spawn((
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgb(0.7, 0.7, 0.8),
+                    custom_size: Some(Vec2::new(chassis_width, chassis_height)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(initial_chassis_x, initial_chassis_y, 0.0),
+                ..default()
+            },
+            RigidBody::Dynamic,
+            Collider::cuboid(chassis_width / 2.0, chassis_half_height),
+            ColliderMassProperties::Density(1.0),
+            Friction::coefficient(0.7),
+            // Stronger damping for stability
+            Damping { linear_damping: 5.0, angular_damping: 5.0 },
+            // Add velocity caps for stability
+            Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
+            // Add velocity limits to prevent explosion
+            Ccd::enabled(), // Enable Continuous Collision Detection for stability
+            GravityScale(1.0), // Ensure normal gravity
+            CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
+            ActiveEvents::COLLISION_EVENTS,
+            Name::new("DebugChassis"),
+            VehiclePart,
+        )).id();
+
+        // Create the debug wheel and attach with a revolute joint
+        for &wheel_x_rel_to_chassis_center in &debug_wheels_data {
+            let wheel_color = Color::rgb(0.5, 0.5, 0.5); // Neutral color for zero torque
+
+            // Calculate wheel position to be touching the ground
+            // Position the bottom of the wheel slightly below the ground level
+            let wheel_world_x = initial_chassis_x + wheel_x_rel_to_chassis_center;
+            let wheel_world_y = initial_chassis_y - chassis_half_height - debug_wheel_radius; // Wheel center Y to match joint setup
+            
+            println!("Spawning wheel at position: ({}, {})", wheel_world_x, wheel_world_y);
+
+            let wheel_entity = commands.spawn((
+                SpriteBundle {
+                    sprite: Sprite {
+                        color: wheel_color,
+                        custom_size: Some(Vec2::new(debug_wheel_radius * 2.0, debug_wheel_radius * 2.0)),
+                        ..default()
+                    },
+                    transform: Transform::from_xyz(wheel_world_x, wheel_world_y, 0.1),
+                    ..default()
+                },
+                RigidBody::Dynamic,
+                Collider::ball(debug_wheel_radius),
+                ColliderMassProperties::Density(debug_wheel_density),
+                Friction::coefficient(debug_wheel_friction),
+                // Stronger damping for the wheel
+                Damping { linear_damping: 5.0, angular_damping: 5.0 },
+                // Add velocity caps for stability
+                Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
+                // Add velocity limits to prevent explosion
+                Ccd::enabled(), // Enable CCD for wheel too
+                GravityScale(1.0), // Ensure normal gravity
+                CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
+                ExternalImpulse::default(),
+                Name::new("DebugWheel"),
+                VehiclePart,
+                VisualizedWheel { motor_gene_torque: debug_motor_torque },
+            )).id();
+
+            // Use a revolute joint to allow wheel rotation
+            let revolute_joint = RevoluteJointBuilder::new()
+                .local_anchor1(Vec2::new(wheel_x_rel_to_chassis_center, -chassis_half_height - debug_wheel_radius))
+                .local_anchor2(Vec2::ZERO);
+                
+            commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, revolute_joint));
+            
+            // Add a visual indicator of wheel rotation (a line from center to edge)
+            commands.entity(wheel_entity).with_children(|parent| {
+                parent.spawn((
+                    SpriteBundle {
+                        sprite: Sprite {
+                            color: Color::BLACK,
+                            custom_size: Some(Vec2::new(debug_wheel_radius, debug_wheel_radius * 0.15)),
+                            anchor: bevy::sprite::Anchor::CenterLeft,
+                            ..default()
+                        },
+                        transform: Transform::from_xyz(0.0, 0.0, 0.01),
+                        ..default()
+                    },
+                    Name::new("WheelRotationIndicator"),
+                ));
+            });
+        }
+        println!("Spawned DEBUG vehicle with non-overlapping wheel placement.");
+
+    } else if let Some(chromosome) = &vis_chromosome.0 { // Original logic for chromosome-based vehicle
+        println!("Spawning vehicle from chromosome.");
         let chassis_genes = &chromosome.chassis;
+        let initial_chassis_x = 0.0;
         let initial_chassis_y = config.initial_height_above_ground + chassis_genes.height / 2.0;
-
-        // Ensure gravity is set for the visual simulation
-        rapier_config.gravity = Vec2::new(0.0, config.gravity); // Corrected
 
         let chassis_entity = commands.spawn((
             SpriteBundle {
@@ -282,12 +508,15 @@ fn setup_current_vehicle_for_visualization(
                     custom_size: Some(Vec2::new(chassis_genes.width, chassis_genes.height)),
                     ..default()
                 },
-                transform: Transform::from_xyz(0.0, initial_chassis_y, 0.0),
+                transform: Transform::from_xyz(initial_chassis_x, initial_chassis_y, 0.0),
                 ..default()
             },
             RigidBody::Dynamic,
             Collider::cuboid(chassis_genes.width / 2.0, chassis_genes.height / 2.0),
-            ActiveEvents::COLLISION_EVENTS, // For debugging if needed
+            ColliderMassProperties::Density(chassis_genes.density),
+            Friction::coefficient(0.7), 
+            CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
+            ActiveEvents::COLLISION_EVENTS, 
             Name::new("Chassis"),
             VehiclePart,
         )).id();
@@ -296,44 +525,61 @@ fn setup_current_vehicle_for_visualization(
             if wheel_gene.active {
                 let wheel_x_abs = wheel_gene.get_x_position(chassis_genes.width);
                 let wheel_y_abs = wheel_gene.get_y_position(chassis_genes.height);
+                
+                let wheel_color = if wheel_gene.motor_torque > 0.0 { Color::rgb(0.8, 0.3, 0.3) } 
+                                  else if wheel_gene.motor_torque < 0.0 { Color::rgb(0.3, 0.3, 0.8) } 
+                                  else { Color::rgb(0.5, 0.5, 0.5) };
 
                 let wheel_entity = commands.spawn((
                     SpriteBundle {
                         sprite: Sprite {
-                            color: Color::rgb(0.5, 0.5, 0.6),
+                            color: wheel_color,
                             custom_size: Some(Vec2::new(wheel_gene.radius * 2.0, wheel_gene.radius * 2.0)),
                             ..default()
                         },
-                        transform: Transform::from_xyz(wheel_x_abs, wheel_y_abs, 0.1), // Positioned relative to chassis later via joint
+                        transform: Transform::from_xyz(initial_chassis_x + wheel_x_abs, initial_chassis_y + wheel_y_abs, 0.1),
                         ..default()
                     },
                     RigidBody::Dynamic,
                     Collider::ball(wheel_gene.radius),
+                    ColliderMassProperties::Density(wheel_gene.density), // Added density for gene wheels too
                     Friction::coefficient(wheel_gene.friction_coefficient),
                     Restitution::coefficient(0.1),
+                    CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
+                    ExternalImpulse::default(), 
                     Name::new("Wheel"),
                     VehiclePart,
+                    VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
                 )).id();
                 
-                let motor_target_vel = if wheel_gene.motor_torque.abs() > 0.01 { 
-                                           -wheel_gene.motor_torque.signum() * 30.0 // Increased target vel for more power
-                                       } else { 0.0 };
-                let motor_stiffness = wheel_gene.motor_torque.abs() * 0.5; // Adjusted stiffness
-                let motor_damping = wheel_gene.motor_torque.abs() * 0.05;  // Adjusted damping
-
                 let joint = RevoluteJointBuilder::new()
-                    .local_anchor1(Vec2::new(wheel_x_abs, wheel_y_abs)) // Anchor on chassis
-                    .local_anchor2(Vec2::new(0.0, 0.0)) // Anchor on wheel center
-                    .motor_velocity(motor_target_vel, motor_damping) // factor is damping for velocity motor
-                    .motor_max_force(wheel_gene.motor_torque.abs() * 200.0) // Increased max force
-                    .motor_model(MotorModel::ForceBased); // Try ForceBased model
+                    .local_anchor1(Vec2::new(wheel_x_abs, wheel_y_abs))
+                    .local_anchor2(Vec2::new(0.0, 0.0)); 
                 
-                commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, joint)); // Corrected Bevy component insertion
+                commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, joint));
+                
+                commands.entity(wheel_entity).with_children(|parent| {
+                    parent.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::BLACK,
+                                custom_size: Some(Vec2::new(wheel_gene.radius, wheel_gene.radius * 0.15)),
+                                anchor: bevy::sprite::Anchor::CenterLeft,
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(0.0, 0.0, 0.01), 
+                            ..default()
+                        },
+                        Name::new("WheelRotationIndicator"),
+                    ));
+                });
             }
         }
-        println!("Spawned full vehicle for visualization.");
+        println!("Spawned full vehicle for visualization with proper torque handling and improved visibility.");
     } else {
-        println!("No chromosome to visualize.");
+        if !vis_state.use_debug_vehicle { // Only print if not in debug mode expecting no chromosome
+            println!("No chromosome to visualize and not in debug mode.");
+        }
     }
 }
 
@@ -342,16 +588,49 @@ fn apply_simulation_speed(sim_speed: Res<SimulationSpeed>, mut time: ResMut<Time
     time.set_relative_speed(sim_speed.0);
 }
 
+// System to control physics pause during visualization
+fn control_visualization_physics_pause(
+    mut vis_state: ResMut<VisualizationState>,
+    mut rapier_config: ResMut<RapierConfiguration>,
+    mut clear_color: ResMut<ClearColor>,
+) {
+    clear_color.0 = Color::rgb(0.1, 0.1, 0.15);
+    
+    if vis_state.is_physics_paused {
+        if vis_state.single_step_requested {
+            // Activate physics for this frame only
+            rapier_config.physics_pipeline_active = true;
+            
+            // Clear the flag after activating physics for one frame
+            vis_state.single_step_requested = false;
+            
+            println!("Physics step executed");
+        } else {
+            // Keep physics inactive when paused and not stepping
+            rapier_config.physics_pipeline_active = false;
+        }
+    } else {
+        // Physics always active when not paused
+        rapier_config.physics_pipeline_active = true;
+    }
+}
+
+// System to ensure physics is active when exiting visualization mode
+fn ensure_physics_active_on_exit_visualization(mut rapier_config: ResMut<RapierConfiguration>) {
+    rapier_config.physics_pipeline_active = true;
+    println!("Ensured Rapier physics is active upon exiting visualization mode.");
+}
+
 // A simple UI panel to display info (requires a Bevy UI library like bevy_egui or native Bevy UI)
 fn ui_system_info_panel(
-    mut contexts: EguiContexts, // If using bevy_egui - needs to be added to App
-    mut evo_res: ResMut<EvoResource>, // Changed from Res to ResMut
+    mut contexts: EguiContexts,
+    mut evo_res: ResMut<EvoResource>,
     sim_mode: Res<State<SimulationMode>>,
     config: Res<SimulationConfig>,
-    mut vis_state: ResMut<VisualizationState>, // Changed from Res to ResMut
+    mut vis_state: ResMut<VisualizationState>,
     mut vis_chromosome: ResMut<CurrentVehicleChromosome>,
     mut next_sim_mode: ResMut<NextState<SimulationMode>>,
-    mut sim_speed: ResMut<SimulationSpeed>, // For simulation speed control via UI
+    mut sim_speed: ResMut<SimulationSpeed>,
     mut batch_run_config: ResMut<BatchRunConfig>,
 ) {
     egui::Window::new("Simulation Info & Controls").show(contexts.ctx_mut(), |ui| {
@@ -371,11 +650,15 @@ fn ui_system_info_panel(
         ui.separator();
         ui.heading("Controls (Keyboard):");
         ui.label("F - Toggle Fast Mode / Pause");
-        ui.label("V - Visualize Best of Current Gen / Pause");
-        ui.label("B - Visualize All-Time Best / Pause");
+        ui.label("V - Visualize Best of Current Gen / Pause Visualization");
+        ui.label("Shift+V - Load Best of Gen & PAUSE Visualization");
+        ui.label("B - Visualize All-Time Best / Pause Visualization");
         ui.label("P - Export Phylogeny (.dot file)");
         ui.label("R - Reset Simulation");
         ui.label("Space - Pause / Resume to Fast Mode");
+        ui.label("K - Toggle Visualization Physics Pause");
+        ui.label("N - Advance One Tick (when viz physics paused)");
+        ui.label("D - Toggle Debug Vehicle Visualization");
         ui.separator();
         ui.heading("Controls (UI Buttons):");
         if ui.button(if *sim_mode.get() == SimulationMode::RunningFast  && batch_run_config.target_generations_this_batch.is_none() { "Pause Fast Mode" } else { "Run Fast (Continuous)" }).clicked() {
@@ -393,8 +676,9 @@ fn ui_system_info_panel(
             } else {
                  if let Some(best_current) = evo_res.1.population.individuals.first() {
                     vis_chromosome.0 = Some(best_current.chromosome.clone());
-                    vis_state.is_simulating_current_vehicle = true; // Directly use ResMut
-                    vis_state.current_simulation_time = 0.0; // Directly use ResMut
+                    vis_state.is_simulating_current_vehicle = true;
+                    vis_state.current_simulation_time = 0.0;
+                    vis_state.use_debug_vehicle = false; // Ensure debug vehicle is off
                     next_sim_mode.set(SimulationMode::Visualizing);
                 } else {
                     println!("No individuals in current gen to visualize.");
@@ -407,8 +691,9 @@ fn ui_system_info_panel(
             } else {
                  if let Some(all_time_best) = &evo_res.1.all_time_best_individual {
                     vis_chromosome.0 = Some(all_time_best.chromosome.clone());
-                    vis_state.is_simulating_current_vehicle = true; // Directly use ResMut
-                    vis_state.current_simulation_time = 0.0; // Directly use ResMut
+                    vis_state.is_simulating_current_vehicle = true;
+                    vis_state.current_simulation_time = 0.0;
+                    vis_state.use_debug_vehicle = false; // Ensure debug vehicle is off
                     next_sim_mode.set(SimulationMode::Visualizing);
                 } else {
                     println!("No all-time best recorded to visualize.");
@@ -421,10 +706,10 @@ fn ui_system_info_panel(
             }
         }
         if ui.button("Reset Simulation").clicked() {
-            evo_res.1.reset(); // evo_res is ResMut, .1.reset() is fine
+            evo_res.1.reset();
             next_sim_mode.set(SimulationMode::Paused);
             vis_chromosome.0 = None;
-            vis_state.is_simulating_current_vehicle = false; // Directly use ResMut
+            vis_state.is_simulating_current_vehicle = false;
             batch_run_config.target_generations_this_batch = None;
             batch_run_config.generations_completed_this_batch = 0;
         }
@@ -449,11 +734,21 @@ fn ui_system_info_panel(
 
         ui.separator();
         ui.label("Simulation Speed (Visualized Mode Only):");
-        // Use bevy_egui::egui::Slider
         if ui.add(egui::Slider::new(&mut sim_speed.0, 0.1..=5.0).text("Speed Factor")).changed() {
-            // The apply_simulation_speed system will handle this.
         }
         ui.label(format!("Current Speed Factor: {:.2}", sim_speed.0));
 
     });
+}
+
+// Configure Rapier physics settings to match headless simulation
+fn configure_physics(
+    mut rapier_config: ResMut<RapierConfiguration>,
+    config: Res<SimulationConfig>,
+) {
+    rapier_config.gravity = Vec2::new(0.0, config.gravity);
+    
+    rapier_config.physics_pipeline_active = true;
+
+    println!("Physics configured with gravity: (0, {})", config.gravity);
 } 
