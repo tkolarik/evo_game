@@ -607,6 +607,7 @@ fn setup_current_vehicle_for_visualization(
                 Name::new("DebugWheel"),
                 VehiclePart,
                 VisualizedWheel { motor_gene_torque: debug_motor_torque },
+                Velocity::default(),
             )).id();
 
             // Use a revolute joint to allow wheel rotation
@@ -701,6 +702,7 @@ fn setup_current_vehicle_for_visualization(
                     Ccd::enabled(), // Enable CCD for wheels
                     VehiclePart,
                     VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
+                    Velocity::default(),
                 )).id();
                 
                 let mut joint_builder = RevoluteJointBuilder::new()
@@ -978,16 +980,15 @@ fn step_vehicle_visualization_simulation(
     mut vis_state: ResMut<VisualizationState>,
     config: Res<SimulationConfig>,
     time: Res<Time<Fixed>>,
-    mut wheel_query: Query<(&VisualizedWheel, &mut ExternalImpulse, &Transform)>,
+    mut wheel_query: Query<(&VisualizedWheel, &mut ExternalImpulse, &Transform, &Velocity, Entity), With<VisualizedWheel>>, // Added Velocity and Entity
     chassis_query: Query<(Entity, &Transform), (With<VehiclePart>, Without<VisualizedWheel>)>, // Modified to get Entity + Transform
-    all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Added &Transform for logging
+    _all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Keep for now, maybe remove later if unused
     _next_sim_mode: ResMut<NextState<SimulationMode>>,
     mut distance_data: ResMut<DistanceComparisonData>,
     mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
     // For querying body states for logging:
-    // More specific queries for logging chassis and wheels by their components might be more robust
     chassis_logging_query: Query<(Entity, &Transform, &Velocity), (With<RigidBody>, With<ReadMassProperties>, With<Name>, With<VehiclePart>, Without<VisualizedWheel>)>, // More specific for Chassis
-    wheel_logging_query: Query<(Entity, &Transform, &Velocity), (With<RigidBody>, With<ReadMassProperties>, With<Name>, With<VisualizedWheel>)>, // More specific for Wheels
+    // Removed wheel_logging_query as wheel_query now has Velocity and Entity
 ) {
     // Only log if physics is not paused (includes both normal running and single step)
     if vis_state.is_simulating_current_vehicle && (!vis_state.is_physics_paused || vis_state.single_step_requested) {
@@ -1020,13 +1021,9 @@ fn step_vehicle_visualization_simulation(
                     if !chassis_logged && vis_state.chassis_entity_for_logging.is_some() { /* Redundant check, but fine */ }
                     else if !chassis_logged { writeln!(file, "Chassis: NOT FOUND (general fallback)").unwrap_or_default(); }
 
-                    // Find and log wheels (assuming they are named "Wheel" or "DebugWheel")
-                    // This is a bit basic, ideally we'd map entities created from chromosome.wheels
+                    // Log wheels using the main wheel_query
                     let mut wheel_log_idx = 0;
-                    // Iterate through the specific wheel query
-                    for (entity, transform, velocity) in wheel_logging_query.iter() {
-                        // We might still want to check against a list of known wheel entities if available
-                        // For now, just log all entities found by this specific query.
+                    for (_visual_wheel_data, _impulse, transform, velocity, entity) in wheel_query.iter() {
                         writeln!(file, "Wheel {}: entity={:?}, pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}",
                             wheel_log_idx, entity, transform.translation.x, transform.translation.y, transform.rotation.to_euler(EulerRot::ZYX).0,
                             velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
@@ -1045,18 +1042,10 @@ fn step_vehicle_visualization_simulation(
     if vis_state.is_simulating_current_vehicle {
         // Only increment simulation time if physics is not paused or we're doing a single step
         if !vis_state.is_physics_paused || vis_state.single_step_requested {
-            // Torque application to wheels is now handled by joint motors, so this loop is removed.
-            // for (wheel, mut impulse, _transform) in wheel_query.iter_mut() {
-            //     // Apply impulse scaled by time delta
-            //     let scaled_torque = wheel.motor_gene_torque * time.delta_seconds();
-            //     
-            //     // Clear any existing impulse to prevent accumulation
-            //     impulse.torque_impulse = 0.0;
-            //     
-            //     // Apply the torque directly - no clamping, rely on gene limits instead
-            //     impulse.torque_impulse += scaled_torque;
-            // }
-            
+            // Torque application to wheels is now handled by joint motors in Bevy Rapier for visualized entities.
+            // The VisualizedWheel component's motor_gene_torque is used when setting up the joint's motor.
+            // No explicit impulse application per step is needed here for the motors to function.
+
             // Increment simulation time if physics is running
             vis_state.current_simulation_time += time.delta_seconds();
             

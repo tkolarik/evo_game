@@ -88,6 +88,7 @@ impl PhysicsWorld {
         let mut broad_phase = BroadPhase::new();
         let mut narrow_phase = NarrowPhase::new();
         let mut ccd_solver = CCDSolver::new();
+        let mut query_pipeline = QueryPipeline::new(); // Create a query pipeline
 
         // 1. Create the ground (with fixed body)
         let ground_body = RigidBodyBuilder::fixed()
@@ -164,7 +165,7 @@ impl PhysicsWorld {
                     joint_builder = joint_builder
                         .motor_model(MotorModel::ForceBased)
                         // Set target velocity very high/low to indicate direction, force is the limit
-                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0) 
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0) // REVERT factor to 1.0
                         .motor_max_force(wheel_gene.motor_torque.abs());
                 }
                 let joint = joint_builder.build();
@@ -215,7 +216,7 @@ impl PhysicsWorld {
                 &mut impulse_joint_set,
                 &mut multibody_joint_set,
                 &mut ccd_solver,
-                None, // Query pipeline, not used here
+                Some(&mut query_pipeline), // Pass the query pipeline
                 &(), // Hook, not used here
                 &(), // Event handler, not used here
             );
