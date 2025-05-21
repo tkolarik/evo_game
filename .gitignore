@@ -45,6 +45,7 @@ profile*
 
 # Log files
 *.log
+*log.txt
 
 # User-specific files or directories
 # e.g., my_notes/

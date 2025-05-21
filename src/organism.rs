@@ -217,4 +217,41 @@ mod tests {
         // However, direct field comparison is fine here given the context.
         // Using `assert_eq!(original_chromosome, reconstructed_chromosome);` would require careful f32 comparison in PartialEq.
     }
+}
+
+// Function to get a specific deterministic chromosome for testing
+pub fn get_test_chromosome() -> Chromosome {
+    let chassis = ChassisGenes {
+        width: 2.0,
+        height: 1.0,
+        density: 1.0,
+    };
+
+    let mut wheels = Vec::with_capacity(NUM_POTENTIAL_WHEELS);
+
+    // Active wheel
+    wheels.push(WheelGenes {
+        active: true,
+        x_position_factor: 0.0, // Centered
+        y_position_factor: -0.8, // Lower part of chassis relative to its center
+        radius: 0.5,
+        density: 1.0,
+        motor_torque: 0.0000005, // Small positive torque
+        friction_coefficient: 1.0,
+    });
+
+    // Inactive wheels
+    for _ in 1..NUM_POTENTIAL_WHEELS {
+        wheels.push(WheelGenes {
+            active: false,
+            x_position_factor: 0.0,
+            y_position_factor: 0.0,
+            radius: MIN_WHEEL_RADIUS, // Default values for inactive
+            density: MIN_WHEEL_DENSITY,
+            motor_torque: 0.0,
+            friction_coefficient: MIN_WHEEL_FRICTION_COEFFICIENT,
+        });
+    }
+
+    Chromosome { chassis, wheels }
 } 

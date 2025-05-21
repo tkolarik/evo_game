@@ -1,4 +1,4 @@
-use crate::organism::{Chromosome, MIN_CHASSIS_WIDTH, MAX_CHASSIS_WIDTH, MIN_CHASSIS_HEIGHT, MAX_CHASSIS_HEIGHT, MIN_CHASSIS_DENSITY, MAX_CHASSIS_DENSITY, MIN_WHEEL_RADIUS, MAX_WHEEL_RADIUS, MIN_WHEEL_DENSITY, MAX_WHEEL_DENSITY, MIN_WHEEL_MOTOR_TORQUE, MAX_WHEEL_MOTOR_TORQUE, MIN_WHEEL_FRICTION_COEFFICIENT, MAX_WHEEL_FRICTION_COEFFICIENT};
+use crate::organism::{Chromosome, MIN_CHASSIS_WIDTH, MAX_CHASSIS_WIDTH, MIN_CHASSIS_HEIGHT, MAX_CHASSIS_HEIGHT, MIN_CHASSIS_DENSITY, MAX_CHASSIS_DENSITY, MIN_WHEEL_RADIUS, MAX_WHEEL_RADIUS, MIN_WHEEL_DENSITY, MAX_WHEEL_DENSITY, MIN_WHEEL_MOTOR_TORQUE, MAX_WHEEL_MOTOR_TORQUE, MIN_WHEEL_FRICTION_COEFFICIENT, MAX_WHEEL_FRICTION_COEFFICIENT, get_test_chromosome};
 use crate::simulation::{PhysicsWorld, SimulationConfig, CrossoverType};
 use rand::prelude::*;
 use rand_distr::{Normal, Distribution};
@@ -228,6 +228,21 @@ impl EvolutionEngine {
         self.rng = StdRng::from_entropy();
         let initial_generation = 0;
         self.population = Population::new_random(self.config.population_size, &mut self.rng, initial_generation);
+        
+        // Overwrite the first individual with the test chromosome for logging purposes
+        if !self.population.individuals.is_empty() && self.config.population_size > 0 {
+            let original_id = self.population.individuals[0].id;
+            self.population.individuals[0] = Individual {
+                id: original_id, // Keep original ID to avoid issues if ID matters elsewhere
+                chromosome: get_test_chromosome(),
+                fitness: 0.0, // Will be evaluated
+                generation: initial_generation,
+            };
+            println!("ENGINE RESET: First individual replaced with TEST chromosome.");
+        } else {
+            println!("ENGINE RESET: Population is empty or size 0, cannot insert test chromosome.");
+        }
+
         self.phylogeny_data.clear();
         for individual in &self.population.individuals {
             self.phylogeny_data.push((individual.id, None, None, initial_generation));

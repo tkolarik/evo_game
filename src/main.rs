@@ -12,6 +12,10 @@ use simulation::{PhysicsWorld as HeadlessPhysicsWorld, SimulationConfig};
 use evolution::EvolutionEngine;
 use visualization::*;
 use phylogeny::write_phylogeny_to_dot_file;
+use crate::organism::get_test_chromosome; // For logging test chromosome
+use std::fs::File; // For logging
+use std::io::Write; // For logging
+use std::sync::Mutex; // For sharing File handle in resource
 
 // --- Collision Groups ---
 const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
@@ -32,6 +36,24 @@ struct EvoResource(HeadlessPhysicsWorld, EvolutionEngine);
 struct BatchRunConfig {
     target_generations_this_batch: Option<usize>,
     generations_completed_this_batch: usize,
+}
+
+// Resource to manage logging state for the test chromosome
+#[derive(Resource)]
+struct TestChromosomeLogState {
+    is_logging: bool,
+    log_file: Option<Mutex<File>>,
+    step_count: u32,
+}
+
+impl Default for TestChromosomeLogState {
+    fn default() -> Self {
+        Self {
+            is_logging: false,
+            log_file: None,
+            step_count: 0,
+        }
+    }
 }
 
 // Enum to define the simulation mode
@@ -74,6 +96,7 @@ pub struct VisualizationState {
     pub initial_chassis_position: Option<Vec2>,
     pub expected_fitness: Option<f32>,
     pub auto_stop_visualization: bool, // New flag: true to automatically stop visualization after sim_duration_secs
+    pub chassis_entity_for_logging: Option<Entity>, // Added to store chassis entity for logging
 }
 
 impl Default for VisualizationState {
@@ -88,6 +111,7 @@ impl Default for VisualizationState {
             initial_chassis_position: None,
             expected_fitness: None,
             auto_stop_visualization: true, // Default to auto-stopping for fair comparison
+            chassis_entity_for_logging: None, // Initialize as None
         }
     }
 }
@@ -124,6 +148,7 @@ fn main() {
         .init_resource::<SimulationSpeed>() // Initialize simulation speed resource
         .init_resource::<BatchRunConfig>() // Initialize batch run config
         .init_resource::<DistanceComparisonData>()
+        .init_resource::<TestChromosomeLogState>() // Initialize logging state
 
         // Configure physics to use fixed timestep for better stability
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0))
@@ -193,6 +218,7 @@ fn keyboard_controls(
     mut vis_chromosome: ResMut<CurrentVehicleChromosome>,
     mut vis_state: ResMut<VisualizationState>,
     mut batch_run_config: ResMut<BatchRunConfig>,
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
 ) {
     let shift_pressed = keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight);
 
@@ -411,6 +437,7 @@ fn setup_current_vehicle_for_visualization(
     mut rapier_config: ResMut<RapierConfiguration>,
     mut vis_state: ResMut<VisualizationState>,
     evo_res: Res<EvoResource>,
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
 ) {
     vis_state.current_simulation_time = 0.0; // Ensure sim time is reset for all visualizations
     // Reset visualization-specific pause state (is_physics_paused is handled by keyboard_controls for debug mode)
@@ -423,8 +450,42 @@ fn setup_current_vehicle_for_visualization(
     // Reset the initial chassis position - will be set after spawning
     vis_state.initial_chassis_position = None;
     
+    // Reset and prepare logging state
+    test_log_state.is_logging = false;
+    test_log_state.log_file = None;
+    test_log_state.step_count = 0;
+    vis_state.chassis_entity_for_logging = None; // Reset chassis entity for logging
+
     // Set the expected fitness value from the individual being visualized if available
     if let Some(chromosome) = &vis_chromosome.0 {
+        // Check if this is the test chromosome for logging
+        let test_chromosome_for_log_setup = get_test_chromosome();
+        if *chromosome == test_chromosome_for_log_setup && !vis_state.use_debug_vehicle {
+            test_log_state.is_logging = true;
+            match File::create("visual_physics_log.txt") {
+                Ok(file) => {
+                    test_log_state.log_file = Some(Mutex::new(file));
+                    if let Some(mutex_file) = &test_log_state.log_file {
+                        if let Ok(mut f) = mutex_file.lock() {
+                            writeln!(f, "VISUALIZATION LOG").unwrap_or_default();
+                             writeln!(f, "Chassis target: width={}, height={}, density={}", 
+                                chromosome.chassis.width, chromosome.chassis.height, chromosome.chassis.density).unwrap_or_default();
+                            for (i, wheel) in chromosome.wheels.iter().enumerate() {
+                                if wheel.active {
+                                    writeln!(f, "Wheel {} target: radius={}, density={}, torque={}, friction={}", 
+                                        i, wheel.radius, wheel.density, wheel.motor_torque, wheel.friction_coefficient).unwrap_or_default();
+                                }
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to create visual_physics_log.txt: {}", e);
+                    test_log_state.is_logging = false; // Don't attempt to log if file creation failed
+                }
+            }
+        }
+
         // Find the individual with this chromosome to get its fitness
         vis_state.expected_fitness = None; // Reset first
         
@@ -508,6 +569,8 @@ fn setup_current_vehicle_for_visualization(
             VehiclePart,
         )).id();
 
+        vis_state.chassis_entity_for_logging = Some(chassis_entity); // Store debug chassis entity
+
         // Create the debug wheel and attach with a revolute joint
         for &wheel_x_rel_to_chassis_center in &debug_wheels_data {
             let wheel_color = Color::rgb(0.5, 0.5, 0.5); // Neutral color for zero torque
@@ -551,7 +614,7 @@ fn setup_current_vehicle_for_visualization(
                 .local_anchor1(Vec2::new(wheel_x_rel_to_chassis_center, -chassis_half_height - debug_wheel_radius))
                 .local_anchor2(Vec2::ZERO)
                 .motor_model(MotorModel::ForceBased)
-                .motor_velocity(if debug_motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0)
+                .motor_velocity(if debug_motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
                 .motor_max_force(debug_motor_torque.abs());
                 
             commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, revolute_joint.build()));
@@ -601,7 +664,11 @@ fn setup_current_vehicle_for_visualization(
             Name::new("Chassis"),
             Ccd::enabled(), // Enable CCD for chassis
             VehiclePart,
+            Velocity::default(), // Ensure Velocity component is present for logging
+            ReadMassProperties::default(), // Ensure ReadMassProperties is present for logging
         )).id();
+
+        vis_state.chassis_entity_for_logging = Some(chassis_entity); // Store evolved chassis entity
 
         for wheel_gene in &chromosome.wheels {
             if wheel_gene.active {
@@ -643,7 +710,7 @@ fn setup_current_vehicle_for_visualization(
                 if wheel_gene.motor_torque != 0.0 {
                     joint_builder = joint_builder
                         .motor_model(MotorModel::ForceBased)
-                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0)
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
                         .motor_max_force(wheel_gene.motor_torque.abs());
                 }
                 
@@ -723,6 +790,7 @@ fn ui_system_info_panel(
     mut next_sim_mode: ResMut<NextState<SimulationMode>>,
     mut sim_speed: ResMut<SimulationSpeed>,
     mut batch_run_config: ResMut<BatchRunConfig>,
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
 ) {
     egui::Window::new("Simulation Info & Controls").show(contexts.ctx_mut(), |ui| {
         ui.label(format!("Current Mode: {:?}", sim_mode.get()));
@@ -915,25 +983,63 @@ fn step_vehicle_visualization_simulation(
     all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Added &Transform for logging
     _next_sim_mode: ResMut<NextState<SimulationMode>>,
     mut distance_data: ResMut<DistanceComparisonData>,
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
+    // For querying body states for logging:
+    // More specific queries for logging chassis and wheels by their components might be more robust
+    chassis_logging_query: Query<(Entity, &Transform, &Velocity), (With<RigidBody>, With<ReadMassProperties>, With<Name>, With<VehiclePart>, Without<VisualizedWheel>)>, // More specific for Chassis
+    wheel_logging_query: Query<(Entity, &Transform, &Velocity), (With<RigidBody>, With<ReadMassProperties>, With<Name>, With<VisualizedWheel>)>, // More specific for Wheels
 ) {
     // Only log if physics is not paused (includes both normal running and single step)
     if vis_state.is_simulating_current_vehicle && (!vis_state.is_physics_paused || vis_state.single_step_requested) {
-        println!("--- step_vehicle_visualization_simulation SYSTEM CALLED ---"); // DEBUG PRINT
+        //println!("--- step_vehicle_visualization_simulation SYSTEM CALLED ---"); // DEBUG PRINT
 
-        // Log all existing wheels and chassis transforms at the start of this system's execution
-        println!("=== PHYSICS STATE ===");
-        
-        // Log chassis position
-        for (entity, transform) in chassis_query.iter() {
-            println!("Chassis entity {entity:?}, Transform: {}", transform.translation);
+        // Log physics state if it's the test chromosome run
+        if test_log_state.is_logging {
+            let current_step_for_log = test_log_state.step_count; // Read step_count first
+
+            if let Some(mutex_file) = &test_log_state.log_file {
+                if let Ok(mut file) = mutex_file.lock() {
+                    writeln!(file, "--- Step {} ---", current_step_for_log).unwrap_or_default();
+                    // test_log_state.step_count += 1; // Moved increment outside lock
+
+                    // Find and log chassis using stored Entity ID
+                    let mut chassis_logged = false;
+                    if let Some(chassis_entity_id) = vis_state.chassis_entity_for_logging {
+                        // Try to get chassis data using a more focused query
+                        if let Ok((entity, transform, velocity)) = chassis_logging_query.get(chassis_entity_id) {
+                            writeln!(file, "Chassis: entity={:?}, pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}",
+                                entity, transform.translation.x, transform.translation.y, transform.rotation.to_euler(EulerRot::ZYX).0,
+                                velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
+                            chassis_logged = true;
+                        } else {
+                             writeln!(file, "Chassis: Entity ID {:?} NOT FOUND in chassis_logging_query", chassis_entity_id).unwrap_or_default();
+                        }
+                    } else {
+                         writeln!(file, "Chassis: Entity ID for logging NOT SET in VisualizationState").unwrap_or_default();
+                    }
+                    if !chassis_logged && vis_state.chassis_entity_for_logging.is_some() { /* Redundant check, but fine */ }
+                    else if !chassis_logged { writeln!(file, "Chassis: NOT FOUND (general fallback)").unwrap_or_default(); }
+
+                    // Find and log wheels (assuming they are named "Wheel" or "DebugWheel")
+                    // This is a bit basic, ideally we'd map entities created from chromosome.wheels
+                    let mut wheel_log_idx = 0;
+                    // Iterate through the specific wheel query
+                    for (entity, transform, velocity) in wheel_logging_query.iter() {
+                        // We might still want to check against a list of known wheel entities if available
+                        // For now, just log all entities found by this specific query.
+                        writeln!(file, "Wheel {}: entity={:?}, pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}",
+                            wheel_log_idx, entity, transform.translation.x, transform.translation.y, transform.rotation.to_euler(EulerRot::ZYX).0,
+                            velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
+                        wheel_log_idx +=1;
+                    }
+                }
+            } else if test_log_state.is_logging { // Log file was None, but logging was intended
+                eprintln!("Error: Test chromosome logging active, but log_file is None in step_vehicle_visualization_simulation.");
+            }
         }
-        
-        let collected_wheels: Vec<_> = all_visualized_wheels_query.iter().collect();
-        println!("Logging all collected wheels ({}): ", collected_wheels.len());
-        for (entity, name, transform) in collected_wheels.iter() {
-            println!("Wheel entity {entity:?} with name: {}, Transform: {}", name, transform.translation);
+        if test_log_state.is_logging { // Increment step_count after file operations
+            test_log_state.step_count += 1;
         }
-        println!("=== END PHYSICS STATE ===");
     }
     
     if vis_state.is_simulating_current_vehicle {

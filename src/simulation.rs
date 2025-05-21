@@ -1,6 +1,9 @@
-use crate::organism::{Chromosome};
+use crate::organism::{Chromosome, get_test_chromosome};
 use rapier2d::prelude::*; 
 use bevy::prelude::Resource;
+use std::io::Write; // For logging
+use std::fs::File; // For logging
+use std::collections::HashMap; // To map handles to wheel index for logging
 
 // --- Collision Groups (mirrored from main.rs) ---
 const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
@@ -25,6 +28,9 @@ impl PhysicsWorld {
         // Create integration parameters that match Bevy's integration more closely
         let mut integration_params = IntegrationParameters::default();
         integration_params.dt = 1.0 / 60.0; // Match the fixed timestep used in visualization
+        integration_params.erp = 0.8; // Default is 0.2, Bevy Rapier default is 0.8 for 2D
+        integration_params.joint_erp = 0.8; // Default is 0.2, Bevy Rapier default is 0.8 for 2D
+        // warmstart_coefficient is 1.0 by default in IntegrationParameters, which matches Bevy Rapier.
         
         Self {
             gravity: vector![0.0, config.gravity],
@@ -35,6 +41,42 @@ impl PhysicsWorld {
     }
 
     pub fn evaluate_fitness(&mut self, chromosome: &Chromosome, config: &SimulationConfig) -> f32 {
+        let test_chromosome = get_test_chromosome();
+        let is_test_run = *chromosome == test_chromosome;
+
+        if is_test_run {
+            println!("HEADLESS: evaluate_fitness called FOR TEST CHROMOSOME."); // Confirm entry
+        }
+
+        let mut log_file: Option<File> = if is_test_run {
+            println!("HEADLESS: Attempting to create headless_physics_log.txt"); // Confirm attempt
+            match File::create("headless_physics_log.txt") {
+                Ok(file) => Some(file),
+                Err(e) => {
+                    eprintln!("Failed to create headless_physics_log.txt: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut wheel_handles_for_logging: HashMap<RigidBodyHandle, usize> = HashMap::new();
+
+        if is_test_run {
+            if let Some(file) = &mut log_file {
+                writeln!(file, "HEADLESS SIMULATION LOG").unwrap_or_default();
+                writeln!(file, "Chassis target: width={}, height={}, density={}", 
+                    chromosome.chassis.width, chromosome.chassis.height, chromosome.chassis.density).unwrap_or_default();
+                for (i, wheel) in chromosome.wheels.iter().enumerate() {
+                    if wheel.active {
+                        writeln!(file, "Wheel {} target: radius={}, density={}, torque={}, friction={}", 
+                            i, wheel.radius, wheel.density, wheel.motor_torque, wheel.friction_coefficient).unwrap_or_default();
+                    }
+                }
+            }
+        }
+
         // Create new physics state for each evaluation
         let mut rigid_body_set = RigidBodySet::new();
         let mut collider_set = ColliderSet::new();
@@ -85,7 +127,7 @@ impl PhysicsWorld {
         collider_set.insert_with_parent(chassis_collider, chassis_handle, &mut rigid_body_set);
 
         // Create wheels and attach them
-        for wheel_gene in &chromosome.wheels {
+        for (idx, wheel_gene) in chromosome.wheels.iter().enumerate() {
             if wheel_gene.active {
                 let wheel_x_abs = wheel_gene.get_x_position(chromosome.chassis.width);
                 let wheel_y_abs = wheel_gene.get_y_position(chromosome.chassis.height);
@@ -101,6 +143,9 @@ impl PhysicsWorld {
                     .build();
                 let wheel_handle = rigid_body_set.insert(wheel_rb);
                 vehicle_part_handles.push(wheel_handle);
+                if is_test_run { // Store handle for logging if it's the test run
+                    wheel_handles_for_logging.insert(wheel_handle, idx);
+                }
                 
                 let wheel_collider = ColliderBuilder::ball(wheel_gene.radius)
                     .density(wheel_gene.density)
@@ -119,7 +164,7 @@ impl PhysicsWorld {
                     joint_builder = joint_builder
                         .motor_model(MotorModel::ForceBased)
                         // Set target velocity very high/low to indicate direction, force is the limit
-                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 0.0) 
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0) 
                         .motor_max_force(wheel_gene.motor_torque.abs());
                 }
                 let joint = joint_builder.build();
@@ -134,7 +179,31 @@ impl PhysicsWorld {
         // Create a fresh physics pipeline just for this evaluation
         let mut physics_pipeline = PhysicsPipeline::new();
 
-        for _step in 0..sim_steps {
+        for step_num in 0..sim_steps {
+            // Log state if it's the test chromosome
+            if is_test_run {
+                if let Some(file) = &mut log_file {
+                    writeln!(file, "--- Step {} ---", step_num).unwrap_or_default();
+                    if let Some(chassis_rb) = rigid_body_set.get(chassis_handle) {
+                        writeln!(file, "Chassis: pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}", 
+                            chassis_rb.translation().x, chassis_rb.translation().y, chassis_rb.rotation().angle(),
+                            chassis_rb.linvel().x, chassis_rb.linvel().y, chassis_rb.angvel()).unwrap_or_default();
+                    } else {
+                        writeln!(file, "Chassis: NOT FOUND").unwrap_or_default();
+                    }
+
+                    for (handle, wheel_idx) in &wheel_handles_for_logging {
+                        if let Some(wheel_rb) = rigid_body_set.get(*handle) {
+                            writeln!(file, "Wheel {}: pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}",
+                                wheel_idx, wheel_rb.translation().x, wheel_rb.translation().y, wheel_rb.rotation().angle(),
+                                wheel_rb.linvel().x, wheel_rb.linvel().y, wheel_rb.angvel()).unwrap_or_default();
+                        } else {
+                            writeln!(file, "Wheel {}: NOT FOUND", wheel_idx).unwrap_or_default();
+                        }
+                    }
+                }
+            }
+
             physics_pipeline.step(
                 &self.gravity,
                 &self.integration_parameters,
