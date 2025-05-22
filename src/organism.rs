@@ -229,28 +229,29 @@ pub fn get_test_chromosome() -> Chromosome {
 
     let mut wheels = Vec::with_capacity(NUM_POTENTIAL_WHEELS);
 
-    // Active wheel
-    wheels.push(WheelGenes {
-        active: true,
-        x_position_factor: 0.0, // Centered
-        y_position_factor: -2.0, // Adjusted to place wheel just below chassis
-        radius: 0.5,
-        density: 1.0,
-        motor_torque: 0.0, // SET TO ZERO FOR TESTING
-        friction_coefficient: 1.0,
-    });
-
-    // Inactive wheels
-    for _ in 1..NUM_POTENTIAL_WHEELS {
-        wheels.push(WheelGenes {
-            active: false,
-            x_position_factor: 0.0,
-            y_position_factor: 0.0,
-            radius: MIN_WHEEL_RADIUS, // Default values for inactive
-            density: MIN_WHEEL_DENSITY,
-            motor_torque: 0.0,
-            friction_coefficient: MIN_WHEEL_FRICTION_COEFFICIENT,
-        });
+    // Activate the first two wheels for testing, keep others inactive
+    for i in 0..NUM_POTENTIAL_WHEELS {
+        if i < 2 { // Activate first two wheels
+            wheels.push(WheelGenes {
+                active: true,
+                x_position_factor: if i == 0 { -0.5 } else { 0.5 }, // Place them apart
+                y_position_factor: -0.8, // Slightly below chassis center
+                radius: 0.4, 
+                density: 1.0,
+                motor_torque: 0.0000005, // Small positive torque for forward motion
+                friction_coefficient: 1.0,
+            });
+        } else { // Keep other wheels inactive
+            wheels.push(WheelGenes {
+                active: false, 
+                x_position_factor: 0.0, 
+                y_position_factor: 0.0, 
+                radius: MIN_WHEEL_RADIUS, 
+                density: MIN_WHEEL_DENSITY,
+                motor_torque: 0.0,
+                friction_coefficient: MIN_WHEEL_FRICTION_COEFFICIENT,
+            });
+        }
     }
 
     Chromosome { chassis, wheels }

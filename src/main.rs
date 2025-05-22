@@ -3,8 +3,12 @@ mod simulation;
 mod evolution;
 mod visualization;
 mod phylogeny;
+mod physics; // New physics module for shared definitions
 
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    window::PresentMode,
+};
 use bevy_rapier2d::prelude::*;
 use bevy_egui::{egui, EguiPlugin, EguiContexts};
 
@@ -16,6 +20,7 @@ use crate::organism::get_test_chromosome; // For logging test chromosome
 use std::fs::File; // For logging
 use std::io::Write; // For logging
 use std::sync::Mutex; // For sharing File handle in resource
+use physics::{PhysicsParameters, GroundDefinition, VehicleDefinition};
 
 // --- Collision Groups ---
 const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
@@ -140,19 +145,23 @@ fn main() {
     let headless_physics_world = HeadlessPhysicsWorld::new(&sim_config);
     let evolution_engine = EvolutionEngine::new(sim_config.clone());
 
+    // Calculate the initial chromosome once
+    let initial_chromosome = get_test_chromosome(); 
+
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.1, 0.1, 0.15)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Vehicle Evolution Simulator".into(),
                 resolution: (1280.0, 720.0).into(),
+                present_mode: PresentMode::AutoVsync,
                 ..default()
             }),
             ..default()
         }))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
-        .add_plugins(RapierDebugRenderPlugin::default()) // Optional: for debugging colliders
-        .add_plugins(EguiPlugin) // Add EguiPlugin
+        .add_plugins(RapierDebugRenderPlugin::default())
+        .add_plugins(EguiPlugin)
         
         // Initialize States
         .add_state::<SimulationMode>()
@@ -204,33 +213,30 @@ fn main() {
         // Add our stabilization pre-step system
         .add_systems(FixedUpdate, run_simulation_presteps)
         
+        // Add the new logging system
+        .add_systems(
+            FixedUpdate,
+            (
+                handle_test_chassis_logging,
+            ),
+        )
+        
         .run();
 }
 
 fn setup_ground_visualization(mut commands: Commands, config: Res<SimulationConfig>) {
-    // Create a more noticeable ground that matches the screenshot
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.3, 0.6, 0.3),
-                custom_size: Some(Vec2::new(4000.0, 1000.0)),
-                ..default()
-            },
-            // This transform will be used by the RigidBody as well.
-            // To make top surface at Y = -0.15, and sprite/collider half-height is 500.0,
-            // center must be at Y = -0.15 - 500.0 = -500.15.
-            // The Z is for visual layering; physics is 2D.
-            transform: Transform::from_xyz(0.0, -500.15, -0.1),
-            ..default()
-        },
-        RigidBody::Fixed,
-        Collider::cuboid(2000.0, 500.0), // Half-height is 500.0, matches sprite half-height
-        Friction::coefficient(config.ground_friction),
-        Restitution::coefficient(0.0),
-        CollisionGroups::new(Group::from_bits_truncate(GROUP_GROUND), Group::from_bits_truncate(GROUND_FILTER)),
-        Name::new("Ground"),
-    ));
-    println!("Ground created with friction coefficient: {}", config.ground_friction);
+    // Create ground using shared physics module
+    let physics_params = PhysicsParameters {
+        gravity: config.gravity,
+        ground_friction: config.ground_friction,
+        ground_restitution: 0.0,
+        erp: 0.01, // Unified value from testing
+        joint_erp: 0.01, // Unified value from testing
+        solver_iterations: 4,
+    };
+    
+    let ground_def = GroundDefinition::new(&physics_params);
+    ground_def.spawn_for_bevy(&mut commands);
 }
 
 fn keyboard_controls(
@@ -454,37 +460,32 @@ fn run_fast_generations(
 
 // System to set up the vehicle for visualization. It needs to run once when entering Visualizing state.
 fn setup_current_vehicle_for_visualization(
-    mut commands: Commands, 
-    vis_chromosome: Res<CurrentVehicleChromosome>,
-    config: Res<SimulationConfig>,
-    vehicle_parts_query: Query<Entity, With<VehiclePart>>,
-    mut rapier_config: ResMut<RapierConfiguration>,
+    mut commands: Commands,
     mut vis_state: ResMut<VisualizationState>,
-    evo_res: Res<EvoResource>,
-    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
+    current_vehicle: Res<CurrentVehicleChromosome>,
+    config: Res<SimulationConfig>,
+    mut rapier_context: ResMut<RapierContext>,
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Re-add for logging
 ) {
-    vis_state.current_simulation_time = 0.0; // Ensure sim time is reset for all visualizations
-    // Reset visualization-specific pause state (is_physics_paused is handled by keyboard_controls for debug mode)
-    if !vis_state.use_debug_vehicle {
-        vis_state.is_physics_paused = false; 
-    }
-    // Ensure physics pipeline is active when starting a new visualization
-    rapier_config.physics_pipeline_active = true;
-
-    // Reset the initial chassis position - will be set after spawning
-    vis_state.initial_chassis_position = None;
+    // Set the same ERP value used in the headless simulation for consistency
+    rapier_context.integration_parameters.erp = 0.01;
+    rapier_context.integration_parameters.joint_erp = 0.01;
     
-    // Reset and prepare logging state
+    // Reset visualization specific state
+    vis_state.current_simulation_time = 0.0;
+    vis_state.is_physics_paused = false;
+    
+    // Reset logging state
     test_log_state.is_logging = false;
     test_log_state.log_file = None;
     test_log_state.step_count = 0;
-    vis_state.chassis_entity_for_logging = None; // Reset chassis entity for logging
-
-    // Set the expected fitness value from the individual being visualized if available
-    if let Some(chromosome) = &vis_chromosome.0 {
+    
+    if let Some(chromosome) = &current_vehicle.0 {
+        println!("Setting up vehicle for visualization");
+        
         // Check if this is the test chromosome for logging
-        let test_chromosome_for_log_setup = get_test_chromosome();
-        if *chromosome == test_chromosome_for_log_setup && !vis_state.use_debug_vehicle {
+        let test_chromosome = get_test_chromosome();
+        if *chromosome == test_chromosome {
             test_log_state.is_logging = true;
             match File::create("visual_physics_log.txt") {
                 Ok(file) => {
@@ -492,7 +493,7 @@ fn setup_current_vehicle_for_visualization(
                     if let Some(mutex_file) = &test_log_state.log_file {
                         if let Ok(mut f) = mutex_file.lock() {
                             writeln!(f, "VISUALIZATION LOG").unwrap_or_default();
-                             writeln!(f, "Chassis target: width={}, height={}, density={}", 
+                            writeln!(f, "Chassis target: width={}, height={}, density={}", 
                                 chromosome.chassis.width, chromosome.chassis.height, chromosome.chassis.density).unwrap_or_default();
                             for (i, wheel) in chromosome.wheels.iter().enumerate() {
                                 if wheel.active {
@@ -505,263 +506,33 @@ fn setup_current_vehicle_for_visualization(
                 },
                 Err(e) => {
                     eprintln!("Failed to create visual_physics_log.txt: {}", e);
-                    test_log_state.is_logging = false; // Don't attempt to log if file creation failed
+                    test_log_state.is_logging = false;
                 }
             }
         }
-
-        // Find the individual with this chromosome to get its fitness
-        vis_state.expected_fitness = None; // Reset first
         
-        if !vis_state.use_debug_vehicle {
-            // Search current generation population
-            for individual in &evo_res.1.population.individuals {
-                if individual.chromosome == *chromosome {
-                    vis_state.expected_fitness = Some(individual.fitness);
-                    println!("Expected fitness from simulation: {:.2}", individual.fitness);
-                    break;
-                }
-            }
-            
-            // If not found in current gen, check all-time best
-            if vis_state.expected_fitness.is_none() {
-                if let Some(best) = &evo_res.1.all_time_best_individual {
-                    if best.chromosome == *chromosome {
-                        vis_state.expected_fitness = Some(best.fitness);
-                        println!("Expected fitness from all-time best: {:.2}", best.fitness);
-                    }
-                }
-            }
-        }
-    } else {
-        vis_state.expected_fitness = None;
-    }
-
-    for entity in vehicle_parts_query.iter() {
-        commands.entity(entity).despawn_recursive();
-    }
-
-    // Ensure gravity is set for the visual simulation
-    rapier_config.gravity = Vec2::new(0.0, config.gravity);
-
-    if vis_state.use_debug_vehicle {
-        println!("Spawning DEBUG vehicle.");
-        // Build a vehicle from hard-coded parameter for debugging
-        let chassis_width = 2.0;
-        let chassis_height = 1.0;
-        let chassis_half_height = chassis_height / 2.0;
-        let debug_wheel_radius = 0.4;
-        let debug_wheel_density = 1.0;
-        let debug_wheel_friction = 1.0;
-        let debug_motor_torque = 0.00000125; // Adjusted from 0.0005 to compensate for scaling changes
-
-        // Lower the chassis so the wheel can make contact with the ground
-        let initial_chassis_x = 0.0;  // Center horizontally
-        let initial_chassis_y = 0.2 + chassis_half_height;  // Just above the ground to ensure wheel contact
+        // Create vehicle using shared physics module
+        let vehicle_def = VehicleDefinition::new(chromosome, config.initial_height_above_ground);
         
-        // Position the wheel on the left side, closer to the ground
-        let wheel_x_rel_to_chassis_center = -0.6; // Left side of chassis
+        // Store initial chassis position for distance tracking
+        let (initial_x, initial_y) = vehicle_def.get_initial_chassis_position();
+        vis_state.initial_chassis_position = Some(Vec2::new(initial_x, initial_y));
         
-        let debug_wheels_data = vec![
-            wheel_x_rel_to_chassis_center,  // Left wheel position
-        ];
-
-        // Create chassis
-        let chassis_entity = commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(0.7, 0.7, 0.8),
-                    custom_size: Some(Vec2::new(chassis_width, chassis_height)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(initial_chassis_x, initial_chassis_y, 0.0),
-                ..default()
-            },
-            RigidBody::Dynamic,
-            Collider::cuboid(chassis_width / 2.0, chassis_half_height),
-            ColliderMassProperties::Density(1.0),
-            Friction::coefficient(0.7),
-            // Stronger damping for stability
-            Damping { linear_damping: 0.5, angular_damping: 0.5 },
-            // Add velocity caps for stability
-            Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
-            // Add velocity limits to prevent explosion
-            Ccd::enabled(), // Enable Continuous Collision Detection for stability
-            CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
-            ActiveEvents::COLLISION_EVENTS,
-            Name::new("DebugChassis"),
-            VehiclePart,
-        )).id();
-
-        vis_state.chassis_entity_for_logging = Some(chassis_entity); // Store debug chassis entity
-
-        // Create the debug wheel and attach with a revolute joint
-        for &wheel_x_rel_to_chassis_center in &debug_wheels_data {
-            let wheel_color = Color::rgb(0.5, 0.5, 0.5); // Neutral color for zero torque
-
-            // Calculate wheel position to be touching the ground
-            // Position the bottom of the wheel slightly below the ground level
-            let wheel_world_x = initial_chassis_x + wheel_x_rel_to_chassis_center;
-            let wheel_world_y = initial_chassis_y - chassis_half_height - debug_wheel_radius; // Wheel center Y to match joint setup
-            
-            println!("Spawning wheel at position: ({}, {})", wheel_world_x, wheel_world_y);
-
-            let wheel_entity = commands.spawn((
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: wheel_color,
-                        custom_size: Some(Vec2::new(debug_wheel_radius * 2.0, debug_wheel_radius * 2.0)),
-                        ..default()
-                    },
-                    transform: Transform::from_xyz(wheel_world_x, wheel_world_y, 0.1),
-                    ..default()
-                },
-                RigidBody::Dynamic,
-                Collider::ball(debug_wheel_radius),
-                ColliderMassProperties::Density(debug_wheel_density),
-                Friction::coefficient(debug_wheel_friction),
-                // Stronger damping for the wheel
-                Damping { linear_damping: 0.5, angular_damping: 0.5 },
-                // Add velocity caps for stability
-                Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
-                // Add velocity limits to prevent explosion
-                Ccd::enabled(), // Enable CCD for wheel too
-                CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
-                ExternalImpulse::default(),
-                Name::new("DebugWheel"),
-                VehiclePart,
-                VisualizedWheel { motor_gene_torque: debug_motor_torque },
-                Velocity::default(),
-            )).id();
-
-            // Use a revolute joint to allow wheel rotation
-            let revolute_joint = RevoluteJointBuilder::new()
-                .local_anchor1(Vec2::new(wheel_x_rel_to_chassis_center, -chassis_half_height - debug_wheel_radius))
-                .local_anchor2(Vec2::ZERO) // Vec2::ZERO is fine here for (0,0)
-                .motor_model(MotorModel::ForceBased)
-                .motor_velocity(if debug_motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
-                .motor_max_force(debug_motor_torque.abs());
-                
-            commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, revolute_joint.build()));
-            
-            // Add a visual indicator of wheel rotation (a line from center to edge)
-            commands.entity(wheel_entity).with_children(|parent| {
-                parent.spawn((
-                    SpriteBundle {
-                        sprite: Sprite {
-                            color: Color::BLACK,
-                            custom_size: Some(Vec2::new(debug_wheel_radius, debug_wheel_radius * 0.15)),
-                            anchor: bevy::sprite::Anchor::CenterLeft,
-                            ..default()
-                        },
-                        transform: Transform::from_xyz(0.0, 0.0, 0.01),
-                        ..default()
-                    },
-                    Name::new("WheelRotationIndicator"),
-                ));
-            });
+        // Spawn chassis
+        let chassis_entity = vehicle_def.spawn_chassis_for_bevy(&mut commands);
+        vis_state.chassis_entity_for_logging = Some(chassis_entity);
+        
+        // Spawn wheels
+        for wheel_idx in 0..chromosome.wheels.len() {
+            vehicle_def.spawn_wheel_for_bevy(&mut commands, chassis_entity, wheel_idx);
         }
-        println!("Spawned DEBUG vehicle with non-overlapping wheel placement.");
-
-    } else if let Some(chromosome) = &vis_chromosome.0 { // Original logic for chromosome-based vehicle
-        println!("Spawning vehicle from chromosome.");
-        let chassis_genes = &chromosome.chassis;
-        let initial_chassis_x = 0.0;
-        let initial_chassis_y = config.initial_height_above_ground + chassis_genes.height / 2.0;
-
-        let chassis_entity = commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(0.7, 0.7, 0.8),
-                    custom_size: Some(Vec2::new(chassis_genes.width, chassis_genes.height)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(initial_chassis_x, initial_chassis_y, 0.0),
-                ..default()
-            },
-            RigidBody::Dynamic,
-            Collider::cuboid(chassis_genes.width / 2.0, chassis_genes.height / 2.0),
-            ColliderMassProperties::Density(chassis_genes.density),
-            Friction::coefficient(0.7), 
-            Damping { linear_damping: 0.5, angular_damping: 0.5 },
-            CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
-            ActiveEvents::COLLISION_EVENTS,
-            Name::new("Chassis"),
-            VehiclePart,
-            Velocity::default(), // Ensure Velocity component is present for logging
-            ReadMassProperties::default(), // Ensure ReadMassProperties is present for logging
-        )).id();
-
-        vis_state.chassis_entity_for_logging = Some(chassis_entity); // Store evolved chassis entity
-
-        for wheel_gene in &chromosome.wheels {
-            if wheel_gene.active {
-                let wheel_x_abs = wheel_gene.get_x_position(chassis_genes.width);
-                let wheel_y_abs = wheel_gene.get_y_position(chassis_genes.height);
-                
-                let wheel_color = if wheel_gene.motor_torque > 0.0 { Color::rgb(0.8, 0.3, 0.3) } 
-                                  else if wheel_gene.motor_torque < 0.0 { Color::rgb(0.3, 0.3, 0.8) } 
-                                  else { Color::rgb(0.5, 0.5, 0.5) };
-
-                let wheel_entity = commands.spawn((
-                    SpriteBundle {
-                        sprite: Sprite {
-                            color: wheel_color,
-                            custom_size: Some(Vec2::new(wheel_gene.radius * 2.0, wheel_gene.radius * 2.0)),
-                            ..default()
-                        },
-                        transform: Transform::from_xyz(initial_chassis_x + wheel_x_abs, initial_chassis_y + wheel_y_abs, 0.1),
-                        ..default()
-                    },
-                    RigidBody::Dynamic,
-                    Collider::ball(wheel_gene.radius),
-                    ColliderMassProperties::Density(wheel_gene.density), // Added density for gene wheels too
-                    Friction::coefficient(wheel_gene.friction_coefficient),
-                    Restitution::coefficient(0.1),
-                    Damping { linear_damping: 0.5, angular_damping: 0.5 },
-                    CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
-                    ExternalImpulse::default(), 
-                    Name::new("Wheel"),
-                    VehiclePart,
-                    VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
-                    Velocity::default(),
-                )).id();
-                
-                let mut joint_builder = RevoluteJointBuilder::new()
-                    .local_anchor1(Vec2::new(wheel_x_abs, wheel_y_abs))
-                    .local_anchor2(Vec2::new(0.0, 0.0));
-                
-                if wheel_gene.motor_torque != 0.0 {
-                    joint_builder = joint_builder
-                        .motor_model(MotorModel::ForceBased)
-                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
-                        .motor_max_force(wheel_gene.motor_torque.abs());
-                }
-                
-                commands.entity(chassis_entity).insert(ImpulseJoint::new(wheel_entity, joint_builder.build()));
-                
-                commands.entity(wheel_entity).with_children(|parent| {
-                    parent.spawn((
-                        SpriteBundle {
-                            sprite: Sprite {
-                                color: Color::BLACK,
-                                custom_size: Some(Vec2::new(wheel_gene.radius, wheel_gene.radius * 0.15)),
-                                anchor: bevy::sprite::Anchor::CenterLeft,
-                                ..default()
-                            },
-                            transform: Transform::from_xyz(0.0, 0.0, 0.01), 
-                            ..default()
-                        },
-                        Name::new("WheelRotationIndicator"),
-                    ));
-                });
-            }
-        }
-        println!("Spawned full vehicle for visualization with proper torque handling and improved visibility.");
-    } else {
-        if !vis_state.use_debug_vehicle { // Only print if not in debug mode expecting no chromosome
-            println!("No chromosome to visualize and not in debug mode.");
-        }
+        
+        // Set state to simulating and reset simulation time
+        vis_state.is_simulating_current_vehicle = true;
+        vis_state.current_simulation_time = 0.0;
+        
+        // Debug message to confirm simulation start
+        println!("Vehicle visualization setup complete, simulation starting");
     }
 }
 
@@ -1114,10 +885,67 @@ fn configure_rapier_params(mut rapier_context: ResMut<RapierContext>) {
     let context = rapier_context.as_mut();
     
     // Set parameters to match headless simulation
-    context.integration_parameters.erp = 0.2; // Back to 0.2
-    context.integration_parameters.joint_erp = 0.2; // Back to 0.2
+    context.integration_parameters.erp = 0.01; // Changed to 0.01
+    context.integration_parameters.joint_erp = 0.01; // Changed to 0.01
     // num_solver_iterations is handled by RapierConfiguration or defaults
     
     // Log that we've configured integration parameters
-    println!("Rapier integration parameters configured: erp=0.2, joint_erp=0.2");
+    println!("Rapier integration parameters configured: erp=0.01, joint_erp=0.01");
+}
+
+fn handle_test_chassis_logging(
+    mut test_log_state: ResMut<TestChromosomeLogState>,
+    _rapier_context: Res<RapierContext>,
+    vis_state: Res<VisualizationState>,
+    chassis_query: Query<(&Transform, &Velocity), (With<VehiclePart>, Without<VisualizedWheel>)>,
+    _time: Res<Time>,
+) {
+    if test_log_state.is_logging {
+        // Increment step count
+        test_log_state.step_count += 1;
+        
+        // Log to file
+        if let Some(mutex_file) = &test_log_state.log_file {
+            if let Ok(mut file) = mutex_file.lock() {
+                writeln!(file, "--- Step {} ---", test_log_state.step_count - 1).unwrap_or_default();
+                
+                let mut found_chassis = false;
+                
+                // Try to find the chassis using the entity ID
+                if let Some(chassis_entity) = vis_state.chassis_entity_for_logging {
+                    if let Ok((transform, velocity)) = chassis_query.get(chassis_entity) {
+                        let chassis_pos = transform.translation;
+                        let chassis_rot = transform.rotation.to_euler(EulerRot::XYZ).2; // Extract Euler Z rotation (2D)
+                        
+                        // Log chassis state
+                        writeln!(file, "Chassis: pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}", 
+                            chassis_pos.x, chassis_pos.y, chassis_rot,
+                            velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
+                        
+                        found_chassis = true;
+                    }
+                }
+                
+                // Fallback: if we couldn't find the chassis by entity ID, try to find any chassis
+                if !found_chassis {
+                    for (transform, velocity) in chassis_query.iter() {
+                        let chassis_pos = transform.translation;
+                        let chassis_rot = transform.rotation.to_euler(EulerRot::XYZ).2; // Extract Euler Z rotation (2D)
+                        
+                        // Log chassis state
+                        writeln!(file, "Chassis (fallback): pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}", 
+                            chassis_pos.x, chassis_pos.y, chassis_rot,
+                            velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
+                        
+                        found_chassis = true;
+                        break; // Only log the first chassis
+                    }
+                }
+                
+                if !found_chassis {
+                    writeln!(file, "Chassis: NOT FOUND").unwrap_or_default();
+                }
+            }
+        }
+    }
 } 
