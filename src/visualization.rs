@@ -3,7 +3,7 @@ use bevy_rapier2d::prelude::*;
 use crate::organism::*;
 use crate::DistanceComparisonData;
 use crate::simulation::SimulationConfig;
-use crate::physics::{VehicleDefinition, GroundDefinition, PhysicsParameters};
+use crate::physics::{VehicleDefinition};
 
 // Marker component for the main camera
 #[derive(Component)]
@@ -179,44 +179,38 @@ pub fn step_vehicle_visualization_simulation(
     mut vis_state: ResMut<VisualizationState>,
     _config: Res<SimulationConfig>,
     time: Res<Time>,
-    mut wheel_query: Query<(&VisualizedWheel, &mut ExternalImpulse, &Transform)>,
-    chassis_query: Query<(Entity, &Transform), (With<VehiclePart>, Without<VisualizedWheel>)>, // Modified to get Entity + Transform
-    all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Added &Transform for logging
+    chassis_query: Query<(Entity, &Transform), (With<VehiclePart>, Without<VisualizedWheel>)>,
+    all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>,
 ) {
-    println!("--- step_vehicle_visualization_simulation SYSTEM CALLED ---"); // DEBUG PRINT
-
-    // Log all existing wheels and chassis transforms at the start of this system's execution
     if vis_state.is_simulating_current_vehicle {
-        println!("=== PHYSICS STATE ===");
-        
-        // Log chassis position
-        for (entity, transform) in chassis_query.iter() {
-            println!("Chassis entity {entity:?}, Transform: {}", transform.translation);
-        }
-        
-        let collected_wheels: Vec<_> = all_visualized_wheels_query.iter().collect();
-        println!("Logging all collected wheels ({}): ", collected_wheels.len());
-        for (entity, name, transform) in collected_wheels.iter() {
-            println!("Wheel entity {entity:?} with name: {}, Transform: {}", name, transform.translation);
-        }
-        println!("=== END PHYSICS STATE ===");
-        
-        // Only apply forces if physics is not paused or we're doing a single step
-        if !vis_state.is_physics_paused || vis_state.single_step_requested {
-            // Apply a small constant torque to wheels, based on wheel genes
-            for (wheel, mut impulse, _transform) in wheel_query.iter_mut() {
-                // Apply torque scaled by time delta (no additional scaling)
-                let scaled_torque = wheel.motor_gene_torque * time.delta_seconds();
-                
-                // Clear any existing impulse to prevent accumulation
-                impulse.torque_impulse = 0.0;
-                
-                // Apply the torque directly - no clamping, rely on gene limits instead
-                impulse.torque_impulse += scaled_torque;
+        // Log physics state (optional, can be made conditional)
+        // Consider adding a flag to vis_state to control this detailed logging
+        if vis_state.current_simulation_time % 1.0 < time.delta_seconds() { // Log roughly once per second
+            println!("=== VISUALIZATION PHYSICS STATE (Time: {:.2}s) ===", vis_state.current_simulation_time);
+            for (entity, transform) in chassis_query.iter() {
+                println!("Chassis entity {entity:?}, Transform: {}", transform.translation);
             }
+            let collected_wheels: Vec<_> = all_visualized_wheels_query.iter().collect();
+            println!("Logging all collected wheels ({}): ", collected_wheels.len());
+            for (entity, name, transform) in collected_wheels.iter() {
+                println!("Wheel entity {entity:?} with name: {}, Transform: {}", name, transform.translation);
+            }
+            println!("=== END VISUALIZATION PHYSICS STATE ===");
+        }
+        
+        // Only update simulation time if physics is not paused or we're doing a single step
+        if !vis_state.is_physics_paused || vis_state.single_step_requested {
+            // Motor torque application is now handled by Rapier's joint motors,
+            // configured during vehicle spawning.
+            // No need to manually apply ExternalImpulse here.
             
             // Increment simulation time if physics is running
             vis_state.current_simulation_time += time.delta_seconds();
+            
+            // If a single step was requested, clear the request
+            if vis_state.single_step_requested {
+                vis_state.single_step_requested = false;
+            }
         }
     }
 }
