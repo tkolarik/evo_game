@@ -4,6 +4,7 @@ use bevy::prelude::Resource;
 use std::io::Write; // For logging
 use std::fs::File; // For logging
 use std::collections::HashMap; // To map handles to wheel index for logging
+use std::num::NonZeroUsize; // Import NonZeroUsize
 
 // --- Collision Groups (mirrored from main.rs) ---
 const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
@@ -20,7 +21,7 @@ pub struct PhysicsWorld {
 }
 
 // Position ground slightly below origin for initial placement
-pub const GROUND_Y_POSITION: f32 = -0.1; 
+pub const GROUND_Y_POSITION: f32 = -0.15; 
 const GROUND_THICKNESS: f32 = 0.1;
 
 impl PhysicsWorld {
@@ -28,9 +29,13 @@ impl PhysicsWorld {
         // Create integration parameters that match Bevy's integration more closely
         let mut integration_params = IntegrationParameters::default();
         integration_params.dt = 1.0 / 60.0; // Match the fixed timestep used in visualization
-        integration_params.erp = 0.8; // Default is 0.2, Bevy Rapier default is 0.8 for 2D
-        integration_params.joint_erp = 0.8; // Default is 0.2, Bevy Rapier default is 0.8 for 2D
+        integration_params.erp = 0.2; // Back to 0.2, as 0.8 was worse
+        integration_params.joint_erp = 0.2; // Back to 0.2
         // warmstart_coefficient is 1.0 by default in IntegrationParameters, which matches Bevy Rapier.
+        if let Some(val) = NonZeroUsize::new(4) { // MATCH Bevy Rapier DEFAULT solver iterations for 2D
+            integration_params.num_solver_iterations = val;
+        }
+        integration_params.num_additional_friction_iterations = 4; // Default Rapier additional friction iterations
         
         Self {
             gravity: vector![0.0, config.gravity],
@@ -92,7 +97,7 @@ impl PhysicsWorld {
 
         // 1. Create the ground (with fixed body)
         let ground_body = RigidBodyBuilder::fixed()
-            .translation(vector![0.0, GROUND_Y_POSITION - GROUND_THICKNESS])
+            .translation(vector![0.0, GROUND_Y_POSITION - (GROUND_THICKNESS / 2.0)]) // Centered so top surface is at GROUND_Y_POSITION
             .build();
         let ground_handle = rigid_body_set.insert(ground_body);
         
@@ -113,9 +118,9 @@ impl PhysicsWorld {
         // Create chassis with more damping to match visualization
         let chassis_rigid_body = RigidBodyBuilder::dynamic()
             .translation(vector![initial_chassis_x, initial_chassis_y])
-            .linear_damping(5.0)
-            .angular_damping(5.0)
-            .ccd_enabled(true)
+            .linear_damping(0.5)
+            .angular_damping(0.5)
+            .ccd_enabled(false) // DEBUG: Temporarily disabled
             .build();
         let chassis_handle = rigid_body_set.insert(chassis_rigid_body);
         vehicle_part_handles.push(chassis_handle);
@@ -138,9 +143,9 @@ impl PhysicsWorld {
                         initial_chassis_x + wheel_x_abs,
                         initial_chassis_y + wheel_y_abs
                     ])
-                    .linear_damping(5.0)
-                    .angular_damping(5.0)
-                    .ccd_enabled(true)
+                    .linear_damping(0.5)
+                    .angular_damping(0.5)
+                    .ccd_enabled(false) // DEBUG: Temporarily disabled
                     .build();
                 let wheel_handle = rigid_body_set.insert(wheel_rb);
                 vehicle_part_handles.push(wheel_handle);
@@ -156,16 +161,24 @@ impl PhysicsWorld {
                     .build();
                 collider_set.insert_with_parent(wheel_collider, wheel_handle, &mut rigid_body_set);
 
-                // Attach wheel to chassis with a revolute joint
+                // Create joint between chassis and wheel
+                let chassis_width = chromosome.chassis.width;
+                let chassis_height = chromosome.chassis.height;
+
+                let anchor_on_chassis = point![
+                    wheel_gene.x_position_factor * chassis_width / 2.0,
+                    wheel_gene.y_position_factor * chassis_height / 2.0
+                ];
+
                 let mut joint_builder = RevoluteJointBuilder::new()
-                    .local_anchor1(point![wheel_x_abs, wheel_y_abs]) // Anchor on chassis
-                    .local_anchor2(point![0.0, 0.0]); // Anchor on wheel center
+                    .local_anchor1(anchor_on_chassis) // Corrected: Anchor on chassis relative to its center
+                    .local_anchor2(point![0.0, 0.0]); // Anchor on wheel (center of wheel)
                 
                 if wheel_gene.motor_torque != 0.0 {
                     joint_builder = joint_builder
                         .motor_model(MotorModel::ForceBased)
-                        // Set target velocity very high/low to indicate direction, force is the limit
-                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0) // REVERT factor to 1.0
+                        // ALIGNED the condition to match visual simulation's effective behavior: positive torque -> MAX velocity
+                        .motor_velocity(if wheel_gene.motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
                         .motor_max_force(wheel_gene.motor_torque.abs());
                 }
                 let joint = joint_builder.build();
@@ -179,6 +192,29 @@ impl PhysicsWorld {
 
         // Create a fresh physics pipeline just for this evaluation
         let mut physics_pipeline = PhysicsPipeline::new();
+        
+        // Ensure initial contact stability (prevent sink-through and initial bounces)
+        // Run multiple pre-steps to settle the physics before actual simulation
+        // REMOVED PRE-STEP LOOP
+        /*
+        for _ in 0..3 {
+            physics_pipeline.step(
+                &self.gravity,
+                &self.integration_parameters,
+                &mut island_manager,
+                &mut broad_phase,
+                &mut narrow_phase,
+                &mut rigid_body_set,
+                &mut collider_set,
+                &mut impulse_joint_set,
+                &mut multibody_joint_set,
+                &mut ccd_solver,
+                Some(&mut query_pipeline),
+                &(), // Hook, not used here
+                &(), // Event handler, not used here
+            );
+        }
+        */
 
         for step_num in 0..sim_steps {
             // Log state if it's the test chromosome
@@ -214,7 +250,7 @@ impl PhysicsWorld {
                 &mut rigid_body_set,
                 &mut collider_set,
                 &mut impulse_joint_set,
-                &mut multibody_joint_set,
+                &mut multibody_joint_set, 
                 &mut ccd_solver,
                 Some(&mut query_pipeline), // Pass the query pipeline
                 &(), // Hook, not used here
@@ -313,7 +349,7 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             sim_duration_secs: 15.0,
-            initial_height_above_ground: 0.25, // Increased from 0.2 for a slight nudge
+            initial_height_above_ground: 1.0, // DEBUG: Increased substantially to 1.0
             gravity: -9.81,
             ground_friction: 1.0, // Increased friction for better traction
             population_size: 50,

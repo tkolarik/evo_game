@@ -116,6 +116,23 @@ impl Default for VisualizationState {
     }
 }
 
+// Add the struct definition for PhysicsSteps
+#[derive(Resource, Default)]
+struct PhysicsSteps(u32);
+
+// New system to stabilize the simulation with pre-steps when a vehicle is spawned
+fn run_simulation_presteps(
+    vis_state: Res<VisualizationState>,
+    mut physics_steps: ResMut<PhysicsSteps>, // Changed from mut commands: Commands
+) {
+    // Only run when we're actively simulating a vehicle and in the first frame
+    if vis_state.is_simulating_current_vehicle && vis_state.current_simulation_time < 0.1 {
+        // Force joint stabilization through Bevy Rapier ECS
+        // println!("Requesting 2 additional physics pre-steps for stabilization."); // COMMENTED OUT
+        // physics_steps.0 += 2; // COMMENTED OUT // Request 2 additional steps (total 3 with the normal step)
+    }
+}
+
 fn main() {
     println!("Vehicle Evolution Simulator Initializing...");
 
@@ -133,7 +150,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
         .add_plugins(RapierDebugRenderPlugin::default()) // Optional: for debugging colliders
         .add_plugins(EguiPlugin) // Add EguiPlugin
         
@@ -149,14 +166,18 @@ fn main() {
         .init_resource::<BatchRunConfig>() // Initialize batch run config
         .init_resource::<DistanceComparisonData>()
         .init_resource::<TestChromosomeLogState>() // Initialize logging state
+        .insert_resource(PhysicsSteps::default())
 
         // Configure physics to use fixed timestep for better stability
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0))
 
         // Startup Systems
-        .add_systems(Startup, setup_graphics)
-        .add_systems(Startup, setup_ground_visualization) // Add a visual ground
-        .add_systems(Startup, configure_physics) // Configure physics to match headless simulation
+        .add_systems(Startup, (
+            setup_graphics,
+            setup_ground_visualization, // Add a visual ground
+            configure_physics,
+            configure_rapier_params, // Add the new system
+        ))
 
         // Systems for controlling simulation flow and visualization
         .add_systems(Update, keyboard_controls)
@@ -179,6 +200,9 @@ fn main() {
         // UI System (placeholder)
         .add_systems(Update, ui_system_info_panel)
         .add_systems(Update, apply_simulation_speed) // System to apply speed to Time<Virtual>
+        
+        // Add our stabilization pre-step system
+        .add_systems(FixedUpdate, run_simulation_presteps)
         
         .run();
 }
@@ -558,7 +582,7 @@ fn setup_current_vehicle_for_visualization(
             ColliderMassProperties::Density(1.0),
             Friction::coefficient(0.7),
             // Stronger damping for stability
-            Damping { linear_damping: 5.0, angular_damping: 5.0 },
+            Damping { linear_damping: 0.5, angular_damping: 0.5 },
             // Add velocity caps for stability
             Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
             // Add velocity limits to prevent explosion
@@ -597,7 +621,7 @@ fn setup_current_vehicle_for_visualization(
                 ColliderMassProperties::Density(debug_wheel_density),
                 Friction::coefficient(debug_wheel_friction),
                 // Stronger damping for the wheel
-                Damping { linear_damping: 5.0, angular_damping: 5.0 },
+                Damping { linear_damping: 0.5, angular_damping: 0.5 },
                 // Add velocity caps for stability
                 Velocity { linvel: Vec2::ZERO, angvel: 0.0 },
                 // Add velocity limits to prevent explosion
@@ -613,7 +637,7 @@ fn setup_current_vehicle_for_visualization(
             // Use a revolute joint to allow wheel rotation
             let revolute_joint = RevoluteJointBuilder::new()
                 .local_anchor1(Vec2::new(wheel_x_rel_to_chassis_center, -chassis_half_height - debug_wheel_radius))
-                .local_anchor2(Vec2::ZERO)
+                .local_anchor2(Vec2::ZERO) // Vec2::ZERO is fine here for (0,0)
                 .motor_model(MotorModel::ForceBased)
                 .motor_velocity(if debug_motor_torque > 0.0 { f32::MAX } else { f32::MIN }, 1.0)
                 .motor_max_force(debug_motor_torque.abs());
@@ -659,11 +683,10 @@ fn setup_current_vehicle_for_visualization(
             Collider::cuboid(chassis_genes.width / 2.0, chassis_genes.height / 2.0),
             ColliderMassProperties::Density(chassis_genes.density),
             Friction::coefficient(0.7), 
-            Damping { linear_damping: 5.0, angular_damping: 5.0 },
+            Damping { linear_damping: 0.5, angular_damping: 0.5 },
             CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
-            ActiveEvents::COLLISION_EVENTS, 
+            ActiveEvents::COLLISION_EVENTS,
             Name::new("Chassis"),
-            Ccd::enabled(), // Enable CCD for chassis
             VehiclePart,
             Velocity::default(), // Ensure Velocity component is present for logging
             ReadMassProperties::default(), // Ensure ReadMassProperties is present for logging
@@ -695,11 +718,10 @@ fn setup_current_vehicle_for_visualization(
                     ColliderMassProperties::Density(wheel_gene.density), // Added density for gene wheels too
                     Friction::coefficient(wheel_gene.friction_coefficient),
                     Restitution::coefficient(0.1),
-                    Damping { linear_damping: 5.0, angular_damping: 5.0 },
+                    Damping { linear_damping: 0.5, angular_damping: 0.5 },
                     CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(VEHICLE_FILTER)),
                     ExternalImpulse::default(), 
                     Name::new("Wheel"),
-                    Ccd::enabled(), // Enable CCD for wheels
                     VehiclePart,
                     VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque },
                     Velocity::default(),
@@ -918,11 +940,12 @@ fn configure_physics(
     mut rapier_config: ResMut<RapierConfiguration>,
     config: Res<SimulationConfig>,
 ) {
+    // Set gravity to match SimulationConfig
     rapier_config.gravity = Vec2::new(0.0, config.gravity);
-    
     rapier_config.physics_pipeline_active = true;
-
-    println!("Physics configured with gravity: (0, {})", config.gravity);
+    // rapier_config.velocity_solver_iterations = 8; // REMOVED - Does not exist on this type
+    
+    println!("Physics configured: gravity=({}, {}), Rapier default solver iterations used", rapier_config.gravity.x, rapier_config.gravity.y);
 }
 
 // New system to record initial chassis position after spawning
@@ -1083,4 +1106,18 @@ fn step_vehicle_visualization_simulation(
             }
         }
     }
+}
+
+// New system to configure Rapier parameters to match headless simulation
+fn configure_rapier_params(mut rapier_context: ResMut<RapierContext>) {
+    // Access the underlying Rapier configuration
+    let context = rapier_context.as_mut();
+    
+    // Set parameters to match headless simulation
+    context.integration_parameters.erp = 0.2; // Back to 0.2
+    context.integration_parameters.joint_erp = 0.2; // Back to 0.2
+    // num_solver_iterations is handled by RapierConfiguration or defaults
+    
+    // Log that we've configured integration parameters
+    println!("Rapier integration parameters configured: erp=0.2, joint_erp=0.2");
 } 

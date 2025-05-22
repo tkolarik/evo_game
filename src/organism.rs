@@ -233,10 +233,10 @@ pub fn get_test_chromosome() -> Chromosome {
     wheels.push(WheelGenes {
         active: true,
         x_position_factor: 0.0, // Centered
-        y_position_factor: -0.8, // Lower part of chassis relative to its center
+        y_position_factor: -2.0, // Adjusted to place wheel just below chassis
         radius: 0.5,
         density: 1.0,
-        motor_torque: 0.0000005, // Small positive torque
+        motor_torque: 0.0, // SET TO ZERO FOR TESTING
         friction_coefficient: 1.0,
     });
 
