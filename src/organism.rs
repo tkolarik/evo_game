@@ -238,7 +238,7 @@ pub fn get_test_chromosome() -> Chromosome {
                 y_position_factor: -0.8, // Slightly below chassis center
                 radius: 0.4, 
                 density: 1.0,
-                motor_torque: 0.0000005, // Small positive torque for forward motion
+                motor_torque: 0.5, // Small positive torque for forward motion
                 friction_coefficient: 1.0,
             });
         } else { // Keep other wheels inactive

@@ -1,6 +1,12 @@
 use crate::organism::{Chromosome, get_test_chromosome};
-use crate::physics::{PhysicsParameters, GROUP_GROUND, GROUP_VEHICLE, GROUND_FILTER, VEHICLE_FILTER};
+use crate::physics::{
+    PhysicsParameters, 
+    GROUP_GROUND, GROUP_VEHICLE, GROUND_FILTER, VEHICLE_FILTER, 
+    MOTOR_TARGET_VEL_FORWARD, MOTOR_TARGET_VEL_REVERSE, MOTOR_STIFFNESS_FACTOR,
+    VehicleDefinition, GroundDefinition
+};
 use bevy::prelude::*;
+// use bevy::app::CoreSchedule; // Removed unused import
 use bevy_rapier2d::prelude::*;
 use std::io::Write;
 use std::fs::File;
@@ -90,15 +96,28 @@ impl PhysicsWorld {
         app.add_systems(Startup, setup_headless_simulation)
            .add_systems(Update, (
                 update_simulation_metrics, 
-                apply_wheel_motors,
                 log_simulation_state_periodically
             ));
         
         // Run the simulation for the configured duration
         let sim_steps = (config.sim_duration_secs * 60.0).round() as u32; // 60 FPS
+        let mut actual_steps_executed = 0;
+        let fixed_time_delta_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
         
         for _ in 0..sim_steps {
-            app.update();
+            // Manually advance Time<Fixed> internal state and then run FixedUpdate schedule.
+            app.world.resource_scope(|_world, mut time_fixed: Mut<Time<Fixed>>| {
+                time_fixed.advance_by(fixed_time_delta_duration);
+            });
+            app.world.run_schedule(FixedUpdate);
+
+            // We might still need to run the main schedule for other things if systems rely on it (e.g. PostUpdate)
+            // For a minimal Rapier setup, FixedUpdate might be enough. Let's test this first.
+            // If PostUpdate systems are needed (e.g. for query state sync before logging), we might need app.update() or parts of it.
+            // For now, assume FixedUpdate is sufficient to drive physics and update transforms for logging.
+            // app.update(); // Comment out for now to see if FixedUpdate alone is enough
+
+            actual_steps_executed += 1;
             // Increment logging step counter if in test run
             if is_test_run {
                 if let Some(mut logging_config) = app.world.get_resource_mut::<LoggingConfig>() {
@@ -111,7 +130,21 @@ impl PhysicsWorld {
         if let Some(mut file) = log_file_handle.take() { // Explicitly take to close
             let final_metrics = app.world.resource::<SimulationMetrics>().clone(); // Clone to release borrow
             let final_params = app.world.resource::<HeadlessSimulationParams>().clone(); // Clone to release borrow
-            let elapsed_time = app.world.resource::<Time>().elapsed_seconds();
+            
+            println!("[evaluate_fitness] Loop intended for {} steps, actual steps executed: {}", sim_steps, actual_steps_executed);
+            
+            let time_fixed_res = app.world.resource::<Time<Fixed>>();
+            println!("[evaluate_fitness] Time<Fixed>: delta_seconds={:?}, timestep={:?}, overstep={:?}, elapsed_seconds={:?}", 
+                time_fixed_res.delta_seconds(), time_fixed_res.timestep(), time_fixed_res.overstep(), time_fixed_res.elapsed_seconds());
+
+            let time_main_res = app.world.resource::<Time>();
+            println!("[evaluate_fitness] Time (main): delta_seconds={:?}, elapsed_seconds={:?}", 
+                time_main_res.delta_seconds(), time_main_res.elapsed_seconds());
+
+            let elapsed_time_for_log = time_fixed_res.elapsed_seconds(); // Use Time<Fixed>.elapsed_seconds for the log
+            let manually_calculated_elapsed_time = actual_steps_executed as f32 * (1.0 / 60.0);
+            println!("[evaluate_fitness] Time<Fixed>.elapsed_seconds() for log: {:.4}", elapsed_time_for_log);
+            println!("[evaluate_fitness] Manually calculated elapsed_time for comparison: {:.4}", manually_calculated_elapsed_time);
 
             // Perform a final detailed log if it was a test run
             if final_params.is_test_run {
@@ -120,7 +153,7 @@ impl PhysicsWorld {
                     &final_metrics,
                     &mut chassis_query_state_for_final_log,
                     &mut wheel_query_state_for_final_log,
-                    elapsed_time,
+                    elapsed_time_for_log, // Use this for the log file
                     &mut file,
                     &app.world
                 );
@@ -130,7 +163,9 @@ impl PhysicsWorld {
             writeln!(file, "--- Final Results ---").unwrap_or_default();
             writeln!(file, "Distance travelled: {}", final_metrics.distance_travelled).unwrap_or_default();
             writeln!(file, "Fragmentation penalty: {}", final_metrics.fragmentation_penalty).unwrap_or_default();
-            writeln!(file, "Final fitness: {}", f32::max(final_metrics.distance_travelled, 0.0) * final_metrics.fragmentation_penalty).unwrap_or_default();
+            // Use the fitness calculated from metrics, not dependent on a potentially incorrect elapsed time for calculation here.
+            let fitness_from_metrics = f32::max(final_metrics.distance_travelled, 0.0) * final_metrics.fragmentation_penalty;
+            writeln!(file, "Final fitness: {}", fitness_from_metrics).unwrap_or_default();
         }
         
         let metrics = app.world.resource::<SimulationMetrics>();
@@ -184,97 +219,47 @@ fn setup_headless_simulation(
     mut commands: Commands,
     params: Res<HeadlessSimulationParams>,
     mut metrics: ResMut<SimulationMetrics>,
+    physics_params_res: Res<PhysicsParameters>,
+    config: Res<SimulationConfig>,
 ) {
     let chromosome = &params.chromosome;
     
-    // Create ground using the same logic as in visualization
+    // Create ground using GroundDefinition
+    let ground_def = GroundDefinition::new(&physics_params_res);
     commands.spawn((
-        TransformBundle::from(Transform::from_xyz(0.0, -0.15, 0.0)),
-        Collider::cuboid(50.0, 0.1), // Large flat ground
+        TransformBundle::from(Transform::from_xyz(0.0, ground_def.get_ground_center_y(), 0.0)),
+        Collider::cuboid(ground_def.half_width, ground_def.half_thickness),
         RigidBody::Fixed,
-        Friction::coefficient(1.0),
-        CollisionGroups::new(Group::from_bits_truncate(GROUP_GROUND), Group::from_bits_truncate(VEHICLE_FILTER)),
-        Name::new("HeadlessGround"), // Added name for clarity
+        Friction::coefficient(ground_def.friction),
+        CollisionGroups::new(Group::from_bits_truncate(GROUP_GROUND), Group::from_bits_truncate(GROUND_FILTER)),
+        Name::new("HeadlessGround"),
     ));
     
-    // Create chassis
-    let initial_y = params.initial_height + chromosome.chassis.height / 2.0;
-    let chassis = commands.spawn((
-        TransformBundle::from(Transform::from_xyz(0.0, initial_y, 0.0)),
-        RigidBody::Dynamic,
-        Collider::cuboid(chromosome.chassis.width / 2.0, chromosome.chassis.height / 2.0),
-        ColliderMassProperties::Density(chromosome.chassis.density),
-        Friction::coefficient(0.5),
-        CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(GROUND_FILTER)),
-        HeadlessVehiclePart,
-        HeadlessChassis,
-        Name::new("Chassis"),
-    )).id();
-    
-    // Store initial chassis position
-    metrics.initial_chassis_position = Some(Vec2::new(0.0, initial_y));
-    
-    // Create wheels
-    for (i, wheel_gene) in chromosome.wheels.iter().enumerate() {
-        if wheel_gene.active {
-            let wheel_x = wheel_gene.get_x_position(chromosome.chassis.width);
-            let wheel_y = wheel_gene.get_y_position(chromosome.chassis.height);
-            
-            // Position relative to chassis
-            let wheel_pos = Vec2::new(wheel_x, wheel_y);
-            
-            // World position of wheel
-            let world_pos = Vec3::new(
-                wheel_x, 
-                initial_y + wheel_y,
-                0.0
-            );
-            
-            // Create wheel entity
-            let wheel = commands.spawn((
-                TransformBundle::from(Transform::from_translation(world_pos)),
-                RigidBody::Dynamic,
-                Collider::ball(wheel_gene.radius),
-                ColliderMassProperties::Density(wheel_gene.density),
-                Friction::coefficient(wheel_gene.friction_coefficient),
-                CollisionGroups::new(Group::from_bits_truncate(GROUP_VEHICLE), Group::from_bits_truncate(GROUND_FILTER)),
-                ExternalImpulse::default(),
-                HeadlessVehiclePart,
-                HeadlessWheel { 
-                    index: i,
-                    motor_torque: wheel_gene.motor_torque,
-                },
-                Name::new(format!("Wheel {}", i)),
-            )).id();
-            
-            // Create joint between wheel and chassis
-            let joint_builder = RevoluteJointBuilder::new()
-                .local_anchor1(wheel_pos) // Anchor on chassis (relative to chassis center)
-                .local_anchor2(Vec2::ZERO); // Anchor on wheel (relative to wheel center)
-            
-            // The ImpulseJoint component is added to the chassis entity.
-            // The first argument to ImpulseJoint::new is the other entity in the joint (the wheel).
-            commands.entity(chassis).insert(ImpulseJoint::new(wheel, joint_builder.build()));
-        }
-    }
-}
+    // Create vehicle using VehicleDefinition and the new spawner
+    let vehicle_def = VehicleDefinition::new(chromosome, config.initial_height_above_ground);
+    let (initial_chassis_x, initial_chassis_y) = vehicle_def.get_initial_chassis_position();
 
-// System to apply motor torques to wheels
-fn apply_wheel_motors(
-    mut wheel_query: Query<(&HeadlessWheel, &mut ExternalImpulse)>,
-    time: Res<Time>,
-) {
-    for (wheel, mut impulse) in wheel_query.iter_mut() {
-        // Apply the motor torque as an external impulse
-        // First clear any existing impulse to prevent accumulation
-        impulse.torque_impulse = 0.0;
-        
-        // Scale torque by time delta
-        let scaled_torque = wheel.motor_torque * time.delta_seconds();
-        
-        // Apply torque
-        impulse.torque_impulse = scaled_torque;
-    }
+    let _chassis_entity = vehicle_def.spawn_with_customizers(
+        &mut commands,
+        |chassis_cmds| {
+            chassis_cmds
+                .insert(HeadlessVehiclePart)
+                .insert(HeadlessChassis)
+                .insert(Name::new("Chassis"));
+        },
+        |wheel_cmds, wheel_idx, wheel_gene| {
+            wheel_cmds
+                .insert(HeadlessVehiclePart)
+                .insert(HeadlessWheel { 
+                    index: wheel_idx,
+                    motor_torque: wheel_gene.motor_torque, 
+                })
+                .insert(Name::new(format!("Wheel {}", wheel_idx)));
+        }
+    );
+    
+    // Store initial chassis position (already calculated via vehicle_def)
+    metrics.initial_chassis_position = Some(Vec2::new(initial_chassis_x, initial_chassis_y));
 }
 
 // System to update simulation metrics

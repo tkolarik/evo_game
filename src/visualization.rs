@@ -3,6 +3,7 @@ use bevy_rapier2d::prelude::*;
 use crate::organism::*;
 use crate::DistanceComparisonData;
 use crate::simulation::SimulationConfig;
+use crate::physics::{VehicleDefinition, GroundDefinition, PhysicsParameters};
 
 // Marker component for the main camera
 #[derive(Component)]
@@ -80,40 +81,85 @@ pub fn despawn_vehicle_parts(
 }
 
 // System to spawn the visual representation of the current vehicle
-// This will be expanded significantly
 pub fn spawn_vehicle_visualization(
     mut commands: Commands,
-    _config: Res<SimulationConfig>,
+    config: Res<SimulationConfig>,
     chromosome_res: Res<CurrentVehicleChromosome>,
-    _rapier_config: ResMut<RapierConfiguration>, // Prefix with underscore to suppress warning
+    mut vis_state: ResMut<VisualizationState>,
 ) {
     if let Some(chromosome) = &chromosome_res.0 {
         println!("Spawning vehicle visualization for chromosome: {:?}", chromosome.chassis.width);
-        // Set gravity for this specific visualization run if needed (usually global)
-        // rapier_config.gravity = Vector::new(0.0, config.gravity);
 
-        // Placeholder: Just draw a rectangle for the chassis for now
-        // Actual vehicle spawning from chromosome will be more complex, mirroring PhysicsWorld logic
-        // but using Bevy entities and Rapier components.
-        
-        let initial_chassis_y = _config.initial_height_above_ground + chromosome.chassis.height / 2.0;
+        let vehicle_def = VehicleDefinition::new(
+            chromosome, 
+            config.initial_height_above_ground
+        );
 
-        commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(0.7, 0.7, 0.8),
-                    custom_size: Some(Vec2::new(chromosome.chassis.width, chromosome.chassis.height)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(0.0, initial_chassis_y, 0.0),
-                ..default()
+        let (initial_x, initial_y) = vehicle_def.get_initial_chassis_position();
+        vis_state.initial_chassis_position = Some(Vec2::new(initial_x, initial_y));
+
+        let _chassis_entity = vehicle_def.spawn_with_customizers(
+            &mut commands,
+            |chassis_cmds| {
+                chassis_cmds
+                    .insert(SpriteBundle {
+                        sprite: Sprite {
+                            color: Color::rgb(0.7, 0.7, 0.8),
+                            custom_size: Some(Vec2::new(vehicle_def.chromosome.chassis.width, vehicle_def.chromosome.chassis.height)),
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .insert(VehiclePart)
+                    .insert(Name::new("Chassis"))
+                    .insert(Velocity::default())
+                    .insert(ReadMassProperties::default());
             },
-            RigidBody::Dynamic,
-            Collider::cuboid(chromosome.chassis.width / 2.0, chromosome.chassis.height / 2.0),
-            VehiclePart,
-            // Note: We'd also add joints and wheels here for a full visualization
-        ));
-        println!("Spawned placeholder chassis for visualization.");
+            |wheel_cmds, wheel_idx, wheel_gene| {
+                let wheel_color = if wheel_gene.motor_torque > 0.0 { 
+                    Color::rgb(0.8, 0.3, 0.3) 
+                } else if wheel_gene.motor_torque < 0.0 { 
+                    Color::rgb(0.3, 0.3, 0.8) 
+                } else { 
+                    Color::rgb(0.5, 0.5, 0.5) 
+                };
+
+                wheel_cmds
+                    .insert(SpriteBundle {
+                        sprite: Sprite {
+                            color: wheel_color,
+                            custom_size: Some(Vec2::new(wheel_gene.radius * 2.0, wheel_gene.radius * 2.0)),
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .insert(VehiclePart)
+                    .insert(VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque })
+                    .insert(Name::new(format!("Wheel {}", wheel_idx)))
+                    .insert(Velocity::default());
+                
+                wheel_cmds.with_children(|parent| {
+                    parent.spawn((
+                        SpriteBundle {
+                            sprite: Sprite {
+                                color: Color::BLACK,
+                                custom_size: Some(Vec2::new(wheel_gene.radius, wheel_gene.radius * 0.15)),
+                                anchor: bevy::sprite::Anchor::CenterLeft,
+                                ..default()
+                            },
+                            transform: Transform::from_xyz(0.0, 0.0, 0.01),
+                            ..default()
+                        },
+                        Name::new("WheelRotationIndicator"),
+                    ));
+                });
+            }
+        );
+        
+        println!("Spawned vehicle for visualization using centralized spawner.");
+
+    } else {
+        println!("No chromosome available in CurrentVehicleChromosome resource for visualization.");
     }
 }
 

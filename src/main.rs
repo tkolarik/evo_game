@@ -21,6 +21,7 @@ use std::fs::File; // For logging
 use std::io::Write; // For logging
 use std::sync::Mutex; // For sharing File handle in resource
 use physics::{PhysicsParameters, GroundDefinition, VehicleDefinition};
+use std::env; // Added for command-line arguments
 
 // --- Collision Groups ---
 const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
@@ -139,6 +140,27 @@ fn run_simulation_presteps(
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.contains(&String::from("--test-headless-eval")) {
+        println!("[Focused Test] Running single headless evaluation...");
+
+        // Ensure log file is clean for this focused test
+        if std::fs::remove_file("headless_physics_log.txt").is_ok() {
+            println!("[Focused Test] Removed existing headless_physics_log.txt");
+        }
+
+        let sim_config = SimulationConfig::default();
+        let mut headless_physics_world = HeadlessPhysicsWorld::new(&sim_config);
+        let test_chromosome = get_test_chromosome();
+
+        println!("[Focused Test] Evaluating chromosome: {:#?}", test_chromosome);
+        let fitness = headless_physics_world.evaluate_fitness(&test_chromosome, &sim_config);
+        println!("[Focused Test] Fitness calculated: {}", fitness);
+        println!("[Focused Test] Check headless_physics_log.txt for detailed physics state.");
+        return; // Exit after the focused test
+    }
+
     println!("Vehicle Evolution Simulator Initializing...");
 
     let sim_config = SimulationConfig::default(); 
