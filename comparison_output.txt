@@ -1,0 +1,410 @@
+warning: unused imports: `GROUP_VEHICLE` and `VEHICLE_FILTER`
+  --> src/main.rs:23:52
+   |
+23 | use physics::{GroundDefinition, VehicleDefinition, GROUP_VEHICLE, GROUP_GROUND, VEHICLE_FILTER, GROUND_FILTER};
+   |                                                    ^^^^^^^^^^^^^                ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `manually_calculated_elapsed_time`
+   --> src/simulation.rs:211:17
+    |
+211 |             let manually_calculated_elapsed_time = actual_steps_executed as f32 * (1.0 / 60.0);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_manually_calculated_elapsed_time`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `final_metrics`
+   --> src/simulation.rs:237:17
+    |
+237 |             let final_metrics = app.world.resource::<SimulationMetrics>(); 
+    |                 ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_metrics`
+
+warning: variable does not need to be mutable
+  --> src/simulation.rs:62:13
+   |
+62 |         let mut initial_log_file_handle: Option<File> = if effective_is_test_run {
+   |             ----^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> src/evolution.rs:285:17
+    |
+285 |             let mut offspring = Individual::from_parents(parent1, parent2, &mut self.rng, &self.config, next_generation_number);
+    |                 ----^^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/main.rs:1057:5
+     |
+1057 |     mut test_log_state: ResMut<TestChromosomeLogState>, 
+     |     ----^^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+
+warning: field `0` is never read
+  --> src/main.rs:87:21
+   |
+87 | struct PhysicsSteps(u32);
+   |        ------------ ^^^
+   |        |
+   |        field in this struct
+   |
+   = help: consider removing this field
+   = note: `PhysicsSteps` has a derived impl for the trait `Default`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `initial_height` is never read
+   --> src/simulation.rs:252:5
+    |
+250 | struct HeadlessSimulationParams {
+    |        ------------------------ field in this struct
+251 |     chromosome: Chromosome,
+252 |     initial_height: f32,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `HeadlessSimulationParams` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `motor_torque` is never read
+   --> src/simulation.rs:285:9
+    |
+283 | pub struct HeadlessWheel {
+    |            ------------- field in this struct
+284 |     pub index: usize,
+285 |     pub motor_torque: f32,
+    |         ^^^^^^^^^^^^
+
+warning: variant `SinglePoint` is never constructed
+   --> src/simulation.rs:565:5
+    |
+564 | pub enum CrossoverType {
+    |          ------------- variant in this enum
+565 |     SinglePoint,
+    |     ^^^^^^^^^^^
+    |
+    = note: `CrossoverType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `show_best_overall` is never read
+  --> src/visualization.rs:31:9
+   |
+28 | pub struct VisualizationState {
+   |            ------------------ field in this struct
+...
+31 |     pub show_best_overall: bool, // Flag to show all-time best vs current gen best
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: function `despawn_vehicle_parts` is never used
+  --> src/visualization.rs:77:8
+   |
+77 | pub fn despawn_vehicle_parts(
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_vehicle_visualization` is never used
+  --> src/visualization.rs:87:8
+   |
+87 | pub fn spawn_vehicle_visualization(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ui_system` is never used
+   --> src/visualization.rs:171:8
+    |
+171 | pub fn ui_system(
+    |        ^^^^^^^^^
+
+warning: function `step_vehicle_visualization_simulation` is never used
+   --> src/visualization.rs:182:8
+    |
+182 | pub fn step_vehicle_visualization_simulation(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `track_vehicle_distance` is never used
+   --> src/visualization.rs:281:8
+    |
+281 | pub fn track_vehicle_distance(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `evo_game` (bin "evo_game") generated 16 warnings (run `cargo fix --bin "evo_game"` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running `target/debug/evo_game --compare-modes`
+[Comparison Test] Running both headless and visualization with same chromosome...
+[Comparison Test] Test chromosome: Chromosome {
+    chassis: ChassisGenes {
+        width: 2.0,
+        height: 1.0,
+        density: 1.0,
+    },
+    wheels: [
+        WheelGenes {
+            active: true,
+            x_position_factor: -0.5,
+            y_position_factor: -0.8,
+            radius: 0.4,
+            density: 1.0,
+            motor_torque: 5.0,
+            friction_coefficient: 1.0,
+        },
+        WheelGenes {
+            active: true,
+            x_position_factor: 0.5,
+            y_position_factor: -0.8,
+            radius: 0.4,
+            density: 1.0,
+            motor_torque: 5.0,
+            friction_coefficient: 1.0,
+        },
+        WheelGenes {
+            active: false,
+            x_position_factor: 0.0,
+            y_position_factor: 0.0,
+            radius: 0.3,
+            density: 0.3,
+            motor_torque: 0.0,
+            friction_coefficient: 0.2,
+        },
+        WheelGenes {
+            active: false,
+            x_position_factor: 0.0,
+            y_position_factor: 0.0,
+            radius: 0.3,
+            density: 0.3,
+            motor_torque: 0.0,
+            friction_coefficient: 0.2,
+        },
+    ],
+}
+[Comparison Test] Running headless simulation...
+HEADLESS: evaluate_fitness called. Chromosome is test_chromosome: true, force_intensive_logging: true. Logging all steps.
+HEADLESS: Attempting to create/truncate headless_main_log.txt
+[SUCCESS] Created/Truncated headless_main_log.txt at "/Users/thomaskolarik/projects/evo_game/headless_main_log.txt"
+[SUCCESS] Created/Truncated headless_periodic_state_log.txt at "/Users/thomaskolarik/projects/evo_game/headless_periodic_state_log.txt"
+[Physics::spawn_with_customizers] Spawning chassis. Config initial_height: 1, Calculated initial_pos: (0, 1.5), Chassis height: 1
+[Physics] Wheel 0 positioning: x_factor=-0.50, y_factor=-0.80, rel_pos=(-0.50, -0.40), world_pos=(-0.50, 1.10)
+[Physics] Wheel 0 entities: chassis_entity=1v0, wheel_entity=2v0
+[Physics] Wheel 0 joint anchors: chassis_anchor=(-0.50, -0.40), wheel_anchor=(0.0, 0.0)
+[Physics] Wheel 0 motor: torque=5.0000, target_vel=f32::MAX (forward), stiffness=1, max_force=5.0000
+[Physics] Creating joint: chassis_entity=1v0 -> wheel_entity=2v0
+[Physics] Wheel 1 positioning: x_factor=0.50, y_factor=-0.80, rel_pos=(0.50, -0.40), world_pos=(0.50, 1.10)
+[Physics] Wheel 1 entities: chassis_entity=1v0, wheel_entity=3v0
+[Physics] Wheel 1 joint anchors: chassis_anchor=(0.50, -0.40), wheel_anchor=(0.0, 0.0)
+[Physics] Wheel 1 motor: torque=5.0000, target_vel=f32::MAX (forward), stiffness=1, max_force=5.0000
+[Physics] Creating joint: chassis_entity=1v0 -> wheel_entity=3v0
+[evaluate_fitness] Loop intended for 900 steps, actual steps executed: 900
+[evaluate_fitness] Time<Fixed>: delta_seconds=0.016666668, timestep=16.666667ms, overstep=1.898738ms, elapsed_seconds=15.6
+[evaluate_fitness] Time (main): delta_seconds=0.000728292, elapsed_seconds=0.6018987
+[Comparison Test] Headless fitness: 0
+[Comparison Test] Starting visualization mode...
+[Comparison Test] Press ESC to exit after observing the vehicle behavior
+Vehicle Evolution Simulator Initializing...
+[2m2025-05-28T00:14:51.948132Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "Apple M1 Pro", vendor: 0, device: 0, device_type: IntegratedGpu, driver: "", driver_info: "", backend: Metal }
+[2m2025-05-28T00:14:52.467821Z[0m [32m INFO[0m [2mbevy_winit::system[0m[2m:[0m Creating new window "Vehicle Evolution Simulator" (0v0)
+[Ground Setup] Creating ground: center_y=-0.200, thickness=0.100, friction=1.000, restitution=0.000
+[DIAGNOSTIC GROUND] Ground config: half_width=1000, half_thickness=0.05, y_position=-0.15, center_y=-0.2
+[DIAGNOSTIC GROUND] Collision groups: GROUP_GROUND=2, GROUND_FILTER=1
+[Ground Setup] Ground spawned with collision groups: GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC GROUND] Ground constants: GROUND_Y_POSITION=-0.15, GROUND_THICKNESS=0.1
+Rapier integration_parameters configured: erp=0.01, joint_erp=0.01, max_vel_iters=4
+RapierConfiguration updated: gravity=(0.00, -9.81)
+Bevy camera spawned with more zoom.
+[2m2025-05-28T00:14:52.508805Z[0m [32m INFO[0m [2mbevy_diagnostic::system_information_diagnostics_plugin::internal[0m[2m:[0m SystemInfo { os: "MacOS 15.5 ", kernel: "24.5.0", cpu: "Apple M1 Pro", core_count: "10", memory: "16.0 GiB" }
+[DIAGNOSTIC GROUND VERIFICATION] Checking for ground entity...
+  ✓ Ground entity 1v0 found!
+    Position: (0.000, -0.200, -0.100)
+    Collision groups: memberships=Group(2), filters=Group(1)
+    Collider type: Cuboid { half_extents: [[1000.0, 0.05]] }
+Resetting simulation...
+ENGINE RESET: First individual replaced with TEST chromosome.
+EvolutionEngine has been reset.
+R pressed: Test chromosome loaded into CurrentVehicleChromosome for visualization.
+V: Preparing to visualize best of current generation (ID: 50).
+Running setup_current_vehicle_for_visualization...
+Spawning vehicle for visualization. Chassis width: 2
+Created/Truncated visualization_physics_log.txt for test chromosome.
+Created/Truncated visualization_query_debug_log.txt.
+[Physics::spawn_with_customizers] Spawning chassis. Config initial_height: 1, Calculated initial_pos: (0, 1.5), Chassis height: 1
+[Vis Setup] Applied chassis customizer. Should have VehiclePart, Name, Sprite.
+[DIAGNOSTIC] Chassis customizer inserting: VehiclePart, Name, Sprite (NOT SpriteBundle)
+[DIAGNOSTIC] Note: TransformBundle will be added by physics.rs spawn_with_customizers
+[Physics] Wheel 0 positioning: x_factor=-0.50, y_factor=-0.80, rel_pos=(-0.50, -0.40), world_pos=(-0.50, 1.10)
+[DIAGNOSTIC] Wheel 0 customizer inserting: VehiclePart, VisualizedWheel, Name, Sprite
+[DIAGNOSTIC] Note: physics.rs will add Transform, RigidBody, Collider, Velocity, etc.
+[Vis Setup] Applied wheel 0 customizer. Should have VehiclePart, VisualizedWheel, Name, Sprite.
+[Physics] Wheel 0 entities: chassis_entity=3v0, wheel_entity=4v0
+[Physics] Wheel 0 joint anchors: chassis_anchor=(-0.50, -0.40), wheel_anchor=(0.0, 0.0)
+[Physics] Wheel 0 motor: torque=5.0000, target_vel=f32::MAX (forward), stiffness=1, max_force=5.0000
+[Physics] Creating joint: chassis_entity=3v0 -> wheel_entity=4v0
+[Physics] Wheel 1 positioning: x_factor=0.50, y_factor=-0.80, rel_pos=(0.50, -0.40), world_pos=(0.50, 1.10)
+[DIAGNOSTIC] Wheel 1 customizer inserting: VehiclePart, VisualizedWheel, Name, Sprite
+[DIAGNOSTIC] Note: physics.rs will add Transform, RigidBody, Collider, Velocity, etc.
+[Vis Setup] Applied wheel 1 customizer. Should have VehiclePart, VisualizedWheel, Name, Sprite.
+[Physics] Wheel 1 entities: chassis_entity=3v0, wheel_entity=6v0
+[Physics] Wheel 1 joint anchors: chassis_anchor=(0.50, -0.40), wheel_anchor=(0.0, 0.0)
+[Physics] Wheel 1 motor: torque=5.0000, target_vel=f32::MAX (forward), stiffness=1, max_force=5.0000
+[Physics] Creating joint: chassis_entity=3v0 -> wheel_entity=6v0
+[Vis Setup] Stored chassis entity 3v0 in vis_state for logging
+Physics simulation should be active for visualization (dt=0.016666668).
+[DIAGNOSTIC COLLISION CHECK] Time: 0.000s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.50, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.10, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.10, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.017s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0000, 0.0000), angvel=0.0000, pos=(0.00, 1.50)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(0.0000, 0.0000), angvel=0.0000, pos=(-0.50, 1.10)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(0.0000, 0.0000), angvel=0.0000, pos=(0.50, 1.10)
+[2m2025-05-28T00:14:54.185361Z[0m [33m WARN[0m [2mbevy_hierarchy::valid_parent_check_plugin[0m[2m:[0m warning[B0004]: The WheelRotationIndicator entity with the InheritedVisibility component has a parent without InheritedVisibility.
+This will cause inconsistent behaviors! See https://bevyengine.org/learn/errors/#b0004
+[2m2025-05-28T00:14:54.185407Z[0m [33m WARN[0m [2mbevy_hierarchy::valid_parent_check_plugin[0m[2m:[0m warning[B0004]: The WheelRotationIndicator entity with the InheritedVisibility component has a parent without InheritedVisibility.
+This will cause inconsistent behaviors! See https://bevyengine.org/learn/errors/#b0004
+[DIAGNOSTIC COLLISION CHECK] Time: 0.017s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.50, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.10, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.10, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.033s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0010, -0.1621), angvel=-0.1958, pos=(0.00, 1.50)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0020, -0.1596), angvel=2.0552, pos=(-0.50, 1.10)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0020, -0.1647), angvel=2.0552, pos=(0.50, 1.10)
+[DIAGNOSTIC COLLISION CHECK] Time: 0.033s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.49, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.09, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.09, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.050s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0030, -0.3197), angvel=-0.3836, pos=(0.00, 1.49)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0059, -0.3121), angvel=4.0523, pos=(-0.50, 1.09)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0060, -0.3273), angvel=4.0523, pos=(0.50, 1.09)
+[DIAGNOSTIC COLLISION CHECK] Time: 0.050s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.48, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.08, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.08, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.067s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0058, -0.4793), angvel=-0.5716, pos=(0.00, 1.48)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0115, -0.4642), angvel=6.0740, pos=(-0.50, 1.08)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0117, -0.4941), angvel=6.0740, pos=(0.50, 1.08)
+[DIAGNOSTIC COLLISION CHECK] Time: 0.067s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.47, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.07, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.07, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.083s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0095, -0.6360), angvel=-0.7539, pos=(0.00, 1.47)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0187, -0.6112), angvel=8.0593, pos=(-0.50, 1.07)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0192, -0.6601), angvel=8.0593, pos=(0.50, 1.07)
+[DIAGNOSTIC COLLISION CHECK] Time: 0.083s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.46, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.06, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.06, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.100s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0139, -0.7896), angvel=-0.9305, pos=(0.00, 1.46)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0271, -0.7529), angvel=10.0045, pos=(-0.50, 1.06)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0284, -0.8248), angvel=10.0045, pos=(0.50, 1.06)
+[DIAGNOSTIC COLLISION CHECK] Time: 0.100s
+  Ground entity 1v0: pos.y=-0.20, memberships=Group(2), filters=Group(1)
+  Vehicle parts:
+    3v0 'Chassis': pos.y=1.44, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    4v0 'Wheel 0': pos.y=1.05, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+    6v0 'Wheel 1': pos.y=1.04, memberships=Group(1), filters=Group(2)
+      Collision analysis: vehicle->ground=true, ground->vehicle=true, possible=true
+  Expected collision groups:
+    GROUP_VEHICLE=1, VEHICLE_FILTER=2
+    GROUP_GROUND=2, GROUND_FILTER=1
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.117s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0191, -0.9455), angvel=-1.1078, pos=(0.00, 1.44)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0366, -0.8945), angvel=11.9770, pos=(-0.50, 1.05)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0393, -0.9933), angvel=11.9770, pos=(0.50, 1.04)
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.133s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0249, -1.1002), angvel=-1.2817, pos=(0.00, 1.43)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0471, -1.0327), angvel=13.9333, pos=(-0.50, 1.03)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0519, -1.1622), angvel=13.9333, pos=(0.50, 1.02)
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.150s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0313, -1.2539), angvel=-1.4525, pos=(0.00, 1.41)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0582, -1.1675), angvel=15.8733, pos=(-0.50, 1.01)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0662, -1.3310), angvel=15.8733, pos=(0.50, 1.00)
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.167s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0382, -1.4016), angvel=-1.6141, pos=(0.00, 1.38)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0697, -1.2940), angvel=17.7337, pos=(-0.50, 0.99)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.0822, -1.4946), angvel=17.7337, pos=(0.49, 0.98)
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.183s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0456, -1.5533), angvel=-1.7789, pos=(0.00, 1.36)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0813, -1.4223), angvel=19.6424, pos=(-0.51, 0.97)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.1000, -1.6628), angvel=19.6424, pos=(0.49, 0.95)
+[DIAGNOSTIC VELOCITY CHECK] Time: 0.200s
+  Entity 3v0 'Chassis': HAS Velocity - linvel=(0.0534, -1.7029), angvel=-1.9392, pos=(0.00, 1.33)
+  Entity 4v0 'Wheel 0': HAS Velocity - linvel=(-0.0929, -1.5460), angvel=21.5184, pos=(-0.51, 0.94)
+  Entity 6v0 'Wheel 1': HAS Velocity - linvel=(-0.1196, -1.8291), angvel=21.5184, pos=(0.49, 0.92)
+[Visualization] Step 60, Time<Fixed> elapsed: 2.5333s, vis_state.current_simulation_time: 0.9833s
+[Visualization] Step 120, Time<Fixed> elapsed: 3.5333s, vis_state.current_simulation_time: 1.9833s
+[Visualization] Step 180, Time<Fixed> elapsed: 4.5333s, vis_state.current_simulation_time: 2.9833s
+[Visualization] Step 240, Time<Fixed> elapsed: 5.5333s, vis_state.current_simulation_time: 3.9833s
+[Visualization] Step 300, Time<Fixed> elapsed: 6.5333s, vis_state.current_simulation_time: 4.9833s
+[Visualization] Step 360, Time<Fixed> elapsed: 7.5333s, vis_state.current_simulation_time: 5.9834s
+[Visualization] Step 420, Time<Fixed> elapsed: 8.5333s, vis_state.current_simulation_time: 6.9834s
+[Visualization] Step 480, Time<Fixed> elapsed: 9.5333s, vis_state.current_simulation_time: 7.9834s
+[Visualization] Step 540, Time<Fixed> elapsed: 10.5333s, vis_state.current_simulation_time: 8.9834s
+[Visualization] Step 600, Time<Fixed> elapsed: 11.5333s, vis_state.current_simulation_time: 9.9834s
+[Visualization] Step 660, Time<Fixed> elapsed: 12.5333s, vis_state.current_simulation_time: 10.9833s
+[Visualization] Step 720, Time<Fixed> elapsed: 13.5333s, vis_state.current_simulation_time: 11.9833s
+[Visualization] Step 780, Time<Fixed> elapsed: 14.5333s, vis_state.current_simulation_time: 12.9833s
+[Visualization] Step 840, Time<Fixed> elapsed: 15.5333s, vis_state.current_simulation_time: 13.9833s
+[Visualization] Step 900, Time<Fixed> elapsed: 16.5333s, vis_state.current_simulation_time: 14.9833s
+AUTO-STOP: Visualization reached 15 seconds (matching simulation duration)
+[Visualization] Step 960, Time<Fixed> elapsed: 17.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1020, Time<Fixed> elapsed: 18.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1080, Time<Fixed> elapsed: 19.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1140, Time<Fixed> elapsed: 20.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1200, Time<Fixed> elapsed: 21.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1260, Time<Fixed> elapsed: 22.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1320, Time<Fixed> elapsed: 23.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1380, Time<Fixed> elapsed: 24.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1440, Time<Fixed> elapsed: 25.5333s, vis_state.current_simulation_time: 15.0166s
+[Visualization] Step 1500, Time<Fixed> elapsed: 26.5333s, vis_state.current_simulation_time: 15.0166s

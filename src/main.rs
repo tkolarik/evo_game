@@ -12,43 +12,32 @@ use bevy::{
 use bevy_rapier2d::prelude::*;
 use bevy_egui::{egui, EguiPlugin, EguiContexts};
 
-use simulation::{PhysicsWorld as HeadlessPhysicsWorld, SimulationConfig};
+use simulation::{PhysicsWorld as HeadlessPhysicsWorld, SimulationConfig, BatchRunConfig};
 use evolution::EvolutionEngine;
-use visualization::*;
+use visualization::*; // Import all visualization components
 use phylogeny::write_phylogeny_to_dot_file;
 use crate::organism::get_test_chromosome; // For logging test chromosome
 use std::fs::File; // For logging
 use std::io::Write; // For logging
 use std::sync::Mutex; // For sharing File handle in resource
-use physics::{PhysicsParameters, GroundDefinition, VehicleDefinition};
+use physics::{GroundDefinition, VehicleDefinition, GROUP_VEHICLE, GROUP_GROUND, VEHICLE_FILTER, GROUND_FILTER};
 use std::env; // Added for command-line arguments
 
 // --- Collision Groups ---
-const GROUP_VEHICLE: u32 = 1 << 0; // 0b00000001
-const GROUP_GROUND: u32 = 1 << 1;  // 0b00000010
-// Add more groups as needed, e.g., GROUP_OBSTACLE = 1 << 2;
-
-const VEHICLE_FILTER: u32 = GROUP_GROUND; // Vehicles collide with ground
-const GROUND_FILTER: u32 = GROUP_VEHICLE;   // Ground collides with vehicles
-
-// --- Bevy App Setup ---
 
 // Resource to manage the main evolution engine
 #[derive(Resource)]
 struct EvoResource(HeadlessPhysicsWorld, EvolutionEngine);
 
 // Resource to manage batch running of generations
-#[derive(Resource, Default)]
-struct BatchRunConfig {
-    target_generations_this_batch: Option<usize>,
-    generations_completed_this_batch: usize,
-}
+// REMOVED: BatchRunConfig definition - now imported from simulation.rs
 
 // Resource to manage logging state for the test chromosome
 #[derive(Resource)]
 struct TestChromosomeLogState {
     is_logging: bool,
-    log_file: Option<Mutex<File>>,
+    log_file: Option<Mutex<File>>, // For regular physics state
+    debug_log_file: Option<Mutex<File>>, // For detailed query debugging
     step_count: u32,
 }
 
@@ -57,6 +46,7 @@ impl Default for TestChromosomeLogState {
         Self {
             is_logging: false,
             log_file: None,
+            debug_log_file: None, // Initialize as None
             step_count: 0,
         }
     }
@@ -90,37 +80,7 @@ pub struct DistanceComparisonData {
 }
 
 // Resource to control simulation state for visualization
-#[derive(Resource)]
-pub struct VisualizationState {
-    pub is_simulating_current_vehicle: bool,
-    pub current_simulation_time: f32,
-    pub show_best_overall: bool, // Flag to show all-time best vs current gen best
-    pub is_physics_paused: bool, // New flag: true to pause Rapier physics during visualization
-    pub single_step_requested: bool, // New flag: true to advance physics by one tick when paused
-    pub use_debug_vehicle: bool, // New flag: true to use a hardcoded debug vehicle
-    // For distance tracking and comparison
-    pub initial_chassis_position: Option<Vec2>,
-    pub expected_fitness: Option<f32>,
-    pub auto_stop_visualization: bool, // New flag: true to automatically stop visualization after sim_duration_secs
-    pub chassis_entity_for_logging: Option<Entity>, // Added to store chassis entity for logging
-}
-
-impl Default for VisualizationState {
-    fn default() -> Self {
-        Self {
-            is_simulating_current_vehicle: false,
-            current_simulation_time: 0.0,
-            show_best_overall: false,
-            is_physics_paused: false, // Default to not paused
-            single_step_requested: false, // Default to no single step requested
-            use_debug_vehicle: false, // Default to not using debug vehicle
-            initial_chassis_position: None,
-            expected_fitness: None,
-            auto_stop_visualization: true, // Default to auto-stopping for fair comparison
-            chassis_entity_for_logging: None, // Initialize as None
-        }
-    }
-}
+// (Using VisualizationState from visualization.rs)
 
 // Add the struct definition for PhysicsSteps
 #[derive(Resource, Default)]
@@ -129,13 +89,160 @@ struct PhysicsSteps(u32);
 // New system to stabilize the simulation with pre-steps when a vehicle is spawned
 fn run_simulation_presteps(
     vis_state: Res<VisualizationState>,
-    mut physics_steps: ResMut<PhysicsSteps>, // Changed from mut commands: Commands
+    _physics_steps: ResMut<PhysicsSteps>, // MODIFIED: Prefixed with _ as it's unused now
 ) {
     // Only run when we're actively simulating a vehicle and in the first frame
     if vis_state.is_simulating_current_vehicle && vis_state.current_simulation_time < 0.1 {
         // Force joint stabilization through Bevy Rapier ECS
         // println!("Requesting 2 additional physics pre-steps for stabilization."); // COMMENTED OUT
         // physics_steps.0 += 2; // COMMENTED OUT // Request 2 additional steps (total 3 with the normal step)
+    }
+}
+
+// DIAGNOSTIC: System to check if Velocity components are present and have values
+fn diagnostic_check_velocity_components(
+    chassis_query: Query<(Entity, &Name, Option<&Velocity>, &Transform), With<VehiclePart>>,
+    vis_state: Res<VisualizationState>,
+) {
+    // Only run diagnostics for first few seconds
+    if !vis_state.is_simulating_current_vehicle || vis_state.current_simulation_time > 0.2 {
+        return;
+    }
+    
+    println!("[DIAGNOSTIC VELOCITY CHECK] Time: {:.3}s", vis_state.current_simulation_time);
+    
+    for (entity, name, velocity, transform) in chassis_query.iter() {
+        match velocity {
+            Some(vel) => {
+                println!("  Entity {:?} '{}': HAS Velocity - linvel=({:.4}, {:.4}), angvel={:.4}, pos=({:.2}, {:.2})",
+                    entity, name.as_str(), vel.linvel.x, vel.linvel.y, vel.angvel,
+                    transform.translation.x, transform.translation.y);
+            }
+            None => {
+                println!("  Entity {:?} '{}': NO Velocity component! pos=({:.2}, {:.2})",
+                    entity, name.as_str(), transform.translation.x, transform.translation.y);
+            }
+        }
+    }
+}
+
+// DIAGNOSTIC: System to monitor ground collision and check entities
+fn diagnostic_monitor_ground_collision(
+    ground_query: Query<(Entity, &Name, &Transform, &CollisionGroups), With<Collider>>,
+    vehicle_query: Query<(Entity, &Name, &Transform, &CollisionGroups), (With<VehiclePart>, With<Collider>)>,
+    vis_state: Res<VisualizationState>,
+) {
+    // Only run once early in simulation
+    if !vis_state.is_simulating_current_vehicle || vis_state.current_simulation_time > 0.1 {
+        return;
+    }
+    
+    println!("[DIAGNOSTIC COLLISION CHECK] Time: {:.3}s", vis_state.current_simulation_time);
+    
+    // Check ground entity
+    let mut ground_found = false;
+    let mut ground_groups: Option<&CollisionGroups> = None;
+    for (entity, name, transform, groups) in ground_query.iter() {
+        if name.as_str() == "Ground" {
+            ground_found = true;
+            ground_groups = Some(groups);
+            println!("  Ground entity {:?}: pos.y={:.2}, memberships={:?}, filters={:?}", 
+                entity, transform.translation.y, groups.memberships, groups.filters);
+            break;
+        }
+    }
+    
+    if !ground_found {
+        println!("  WARNING: Ground entity NOT FOUND!");
+        return;
+    }
+    
+    // Check vehicle collision groups and compatibility
+    println!("  Vehicle parts:");
+    for (entity, name, transform, groups) in vehicle_query.iter() {
+        println!("    {:?} '{}': pos.y={:.2}, memberships={:?}, filters={:?}",
+            entity, name.as_str(), transform.translation.y, 
+            groups.memberships, groups.filters);
+            
+        // Check collision compatibility
+        if let Some(ground_groups) = ground_groups {
+            let vehicle_can_collide_with_ground = groups.filters.intersects(ground_groups.memberships);
+            let ground_can_collide_with_vehicle = ground_groups.filters.intersects(groups.memberships);
+            let collision_possible = vehicle_can_collide_with_ground && ground_can_collide_with_vehicle;
+            
+            println!("      Collision analysis: vehicle->ground={}, ground->vehicle={}, possible={}",
+                vehicle_can_collide_with_ground, ground_can_collide_with_vehicle, collision_possible);
+                
+            if !collision_possible {
+                println!("      ❌ COLLISION GROUPS INCOMPATIBLE!");
+            }
+        }
+            
+        // Check if falling through ground
+        if transform.translation.y < -1.0 {
+            println!("    ⚠️ WARNING: Entity is below ground level!");
+        }
+    }
+    
+    // Log expected collision group values
+    println!("  Expected collision groups:");
+    println!("    GROUP_VEHICLE={}, VEHICLE_FILTER={}", physics::GROUP_VEHICLE, physics::VEHICLE_FILTER);
+    println!("    GROUP_GROUND={}, GROUND_FILTER={}", physics::GROUP_GROUND, physics::GROUND_FILTER);
+}
+
+// DIAGNOSTIC: System to verify ground entity exists after startup
+fn diagnostic_verify_ground_entity(
+    ground_query: Query<(Entity, &Name, &Transform, &CollisionGroups, &Collider), With<Collider>>,
+) {
+    println!("[DIAGNOSTIC GROUND VERIFICATION] Checking for ground entity...");
+    
+    let mut ground_found = false;
+    for (entity, name, transform, groups, collider) in ground_query.iter() {
+        if name.as_str() == "Ground" {
+            ground_found = true;
+            println!("  ✓ Ground entity {:?} found!", entity);
+            println!("    Position: ({:.3}, {:.3}, {:.3})", 
+                transform.translation.x, transform.translation.y, transform.translation.z);
+            println!("    Collision groups: memberships={:?}, filters={:?}", 
+                groups.memberships, groups.filters);
+            println!("    Collider type: {:?}", collider);
+            break;
+        }
+    }
+    
+    if !ground_found {
+        println!("  ❌ CRITICAL: Ground entity NOT FOUND!");
+        println!("  Available entities:");
+        for (entity, name, _, _, _) in ground_query.iter().take(5) {
+            println!("    {:?}: '{}'", entity, name.as_str());
+        }
+    }
+}
+
+// DIAGNOSTIC: Add system to detect ground penetration
+fn diagnostic_detect_ground_penetration(
+    vehicle_query: Query<(Entity, &Name, &Transform), (With<VehiclePart>, With<Collider>)>,
+    vis_state: Res<VisualizationState>,
+) {
+    if !vis_state.is_simulating_current_vehicle {
+        return;
+    }
+    
+    // Check for ground penetration throughout the simulation
+    for (entity, name, transform) in vehicle_query.iter() {
+        let y_pos = transform.translation.y;
+        
+        // Ground surface is at -0.15, so anything below -0.2 is definitely through the ground
+        if y_pos < -0.2 {
+            println!("🚨 [GROUND PENETRATION] Time: {:.3}s - Entity {:?} '{}' penetrated ground: pos.y={:.2}", 
+                vis_state.current_simulation_time, entity, name.as_str(), y_pos);
+        }
+        
+        // Also check for the first time any entity goes below ground surface
+        if y_pos < -0.15 && y_pos > -0.2 {
+            println!("⚠️ [GROUND CONTACT] Time: {:.3}s - Entity {:?} '{}' at ground level: pos.y={:.2}", 
+                vis_state.current_simulation_time, entity, name.as_str(), y_pos);
+        }
     }
 }
 
@@ -155,10 +262,39 @@ fn main() {
         let test_chromosome = get_test_chromosome();
 
         println!("[Focused Test] Evaluating chromosome: {:#?}", test_chromosome);
-        let fitness = headless_physics_world.evaluate_fitness(&test_chromosome, &sim_config);
+        let fitness = headless_physics_world.evaluate_fitness(&test_chromosome, &sim_config, true);
         println!("[Focused Test] Fitness calculated: {}", fitness);
         println!("[Focused Test] Check headless_physics_log.txt for detailed physics state.");
         return; // Exit after the focused test
+    }
+
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--compare-modes" => {
+                println!("[Comparison Test] Running both headless and visualization with same chromosome...");
+                let test_chromosome = get_test_chromosome();
+                println!("[Comparison Test] Test chromosome: {:#?}", test_chromosome);
+                
+                // Run headless first
+                println!("[Comparison Test] Running headless simulation...");
+                let config = SimulationConfig::default();
+                let mut physics_world = HeadlessPhysicsWorld::new(&config);
+                let headless_fitness = physics_world.evaluate_fitness(&test_chromosome, &config, true);
+                println!("[Comparison Test] Headless fitness: {}", headless_fitness);
+                
+                // Now run visualization mode with the same chromosome
+                println!("[Comparison Test] Starting visualization mode...");
+                println!("[Comparison Test] Press ESC to exit after observing the vehicle behavior");
+                // Fall through to normal visualization mode
+            },
+            _ => {
+                println!("Unknown argument: {}", args[1]);
+                println!("Available options:");
+                println!("  --test-headless-eval  : Run headless evaluation test");
+                println!("  --compare-modes       : Compare headless vs visualization");
+                return;
+            }
+        }
     }
 
     println!("Vehicle Evolution Simulator Initializing...");
@@ -168,7 +304,15 @@ fn main() {
     let evolution_engine = EvolutionEngine::new(sim_config.clone());
 
     // Calculate the initial chromosome once
-    let initial_chromosome = get_test_chromosome(); 
+    let _initial_chromosome = get_test_chromosome(); // MODIFIED: Prefixed with _
+    
+    // Check if we're in comparison mode and set up test chromosome
+    let comparison_mode = args.len() > 1 && args[1] == "--compare-modes";
+    let initial_chromosome = if comparison_mode {
+        Some(get_test_chromosome())
+    } else {
+        None
+    };
 
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.1, 0.1, 0.15)))
@@ -181,7 +325,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(EguiPlugin)
         
@@ -191,10 +335,10 @@ fn main() {
         // Resources
         .insert_resource(sim_config) // SimulationConfig is also a Bevy resource
         .insert_resource(EvoResource(headless_physics_world, evolution_engine))
-        .init_resource::<CurrentVehicleChromosome>()
+        .insert_resource(CurrentVehicleChromosome(initial_chromosome)) // Set test chromosome if in comparison mode
         .init_resource::<VisualizationState>()
         .init_resource::<SimulationSpeed>() // Initialize simulation speed resource
-        .init_resource::<BatchRunConfig>() // Initialize batch run config
+        .init_resource::<BatchRunConfig>() // Initialize batch run config 
         .init_resource::<DistanceComparisonData>()
         .init_resource::<TestChromosomeLogState>() // Initialize logging state
         .insert_resource(PhysicsSteps::default())
@@ -235,30 +379,48 @@ fn main() {
         // Add our stabilization pre-step system
         .add_systems(FixedUpdate, run_simulation_presteps)
         
-        // Add the new logging system
+        // DIAGNOSTIC: Add system to check Velocity components after physics sync
+        .add_systems(PostUpdate, diagnostic_check_velocity_components.run_if(in_state(SimulationMode::Visualizing)))
+        
+        // DIAGNOSTIC: Add system to monitor ground collisions
+        .add_systems(Update, diagnostic_monitor_ground_collision.run_if(in_state(SimulationMode::Visualizing)))
+        
+        // DIAGNOSTIC: Add system to verify ground entity after startup
+        .add_systems(PostStartup, diagnostic_verify_ground_entity)
+        
+        // DIAGNOSTIC: Add system to detect ground penetration
+        .add_systems(Update, diagnostic_detect_ground_penetration.run_if(in_state(SimulationMode::Visualizing)))
+        
+        // Add the new logging system - moved to Update to ensure entity commands are flushed
         .add_systems(
-            FixedUpdate,
+            Update,
             (
                 handle_test_chassis_logging,
-            ),
+            ).run_if(in_state(SimulationMode::Visualizing)),
         )
         
         .run();
 }
 
 fn setup_ground_visualization(mut commands: Commands, config: Res<SimulationConfig>) {
-    // Create ground using shared physics module
-    let physics_params = PhysicsParameters {
-        gravity: config.gravity,
-        ground_friction: config.ground_friction,
-        ground_restitution: 0.0,
-        erp: 0.01, // Unified value from testing
-        joint_erp: 0.01, // Unified value from testing
-        solver_iterations: 4,
-    };
+    // Create ground using shared physics module directly from SimulationConfig
+    let ground_def = GroundDefinition::new(&config);
+    println!("[Ground Setup] Creating ground: center_y={:.3}, thickness={:.3}, friction={:.3}, restitution={:.3}", 
+             ground_def.get_ground_center_y(), ground_def.half_thickness * 2.0, ground_def.friction, ground_def.restitution);
     
-    let ground_def = GroundDefinition::new(&physics_params);
+    // DIAGNOSTIC: Log detailed ground configuration before spawning
+    println!("[DIAGNOSTIC GROUND] Ground config: half_width={}, half_thickness={}, y_position={}, center_y={}", 
+        ground_def.half_width, ground_def.half_thickness, ground_def.y_position, ground_def.get_ground_center_y());
+    println!("[DIAGNOSTIC GROUND] Collision groups: GROUP_GROUND={}, GROUND_FILTER={}", GROUP_GROUND, GROUND_FILTER);
+    
     ground_def.spawn_for_bevy(&mut commands);
+    
+    println!("[Ground Setup] Ground spawned with collision groups: GROUP_GROUND={}, GROUND_FILTER={}", 
+             GROUP_GROUND, GROUND_FILTER);
+    
+    // DIAGNOSTIC: Verify ground constants match headless mode
+    println!("[DIAGNOSTIC GROUND] Ground constants: GROUND_Y_POSITION={}, GROUND_THICKNESS={}", 
+        physics::GROUND_Y_POSITION, physics::GROUND_THICKNESS);
 }
 
 fn keyboard_controls(
@@ -270,7 +432,7 @@ fn keyboard_controls(
     mut vis_chromosome: ResMut<CurrentVehicleChromosome>,
     mut vis_state: ResMut<VisualizationState>,
     mut batch_run_config: ResMut<BatchRunConfig>,
-    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
+    _test_log_state: ResMut<TestChromosomeLogState>,
 ) {
     let shift_pressed = keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight);
 
@@ -279,6 +441,7 @@ fn keyboard_controls(
             println!("Switching to RunningFast mode (continuous).");
             batch_run_config.target_generations_this_batch = None; // Ensure continuous mode
             batch_run_config.generations_completed_this_batch = 0;
+            batch_run_config.log_this_batch_intensively = false;
             next_sim_mode.set(SimulationMode::RunningFast);
         } else {
             println!("Switching to Paused mode from RunningFast.");
@@ -348,9 +511,13 @@ fn keyboard_controls(
 
     if keyboard_input.just_pressed(KeyCode::R) { // Reset Simulation
         println!("Resetting simulation...");
-        evo_res.1.reset();
+        evo_res.1.reset(); // This puts test chromosome as first individual
+        
+        // ADDED: Set the test chromosome as the current vehicle for visualization
+        vis_chromosome.0 = Some(get_test_chromosome());
+        println!("R pressed: Test chromosome loaded into CurrentVehicleChromosome for visualization.");
+        
         next_sim_mode.set(SimulationMode::Paused);
-        vis_chromosome.0 = None;
         vis_state.is_simulating_current_vehicle = false;
         batch_run_config.target_generations_this_batch = None; // Reset batch config
         batch_run_config.generations_completed_this_batch = 0;
@@ -362,6 +529,7 @@ fn keyboard_controls(
                 println!("Resuming to RunningFast mode (continuous) from Paused.");
                 batch_run_config.target_generations_this_batch = None; // Ensure continuous mode
                 batch_run_config.generations_completed_this_batch = 0;
+                batch_run_config.log_this_batch_intensively = false;
                 next_sim_mode.set(SimulationMode::RunningFast);
             }
             _ => { // Includes Visualizing and RunningFast
@@ -442,6 +610,7 @@ fn run_fast_generations(
         // We should clear the batch target so it doesn't resume automatically if F is pressed later.
         batch_run_config.target_generations_this_batch = None;
         batch_run_config.generations_completed_this_batch = 0;
+        batch_run_config.log_this_batch_intensively = false;
         return;
     }
 
@@ -450,10 +619,11 @@ fn run_fast_generations(
         next_sim_mode.set(SimulationMode::Paused);
         batch_run_config.target_generations_this_batch = None;
         batch_run_config.generations_completed_this_batch = 0;
+        batch_run_config.log_this_batch_intensively = false;
         return;
     }
 
-    engine.evolve_generation(physics_world);
+    engine.evolve_generation(physics_world, &batch_run_config);
     println!("Completed generation {} (fast mode).", engine.population.generation_count);
 
     if let Some(target_batch_gens) = batch_run_config.target_generations_this_batch {
@@ -466,8 +636,9 @@ fn run_fast_generations(
                 engine.population.generation_count
             );
             next_sim_mode.set(SimulationMode::Paused);
-            batch_run_config.target_generations_this_batch = None; // Reset for next time
+            batch_run_config.target_generations_this_batch = None;
             batch_run_config.generations_completed_this_batch = 0;
+            batch_run_config.log_this_batch_intensively = false;
         } else {
             // Continue batch: next_sim_mode remains RunningFast implicitly
             // (or we could explicitly set it if there was a chance it got changed)
@@ -487,7 +658,7 @@ fn setup_current_vehicle_for_visualization(
     current_vehicle: Res<CurrentVehicleChromosome>,
     config: Res<SimulationConfig>,
     mut rapier_context: ResMut<RapierContext>,
-    mut test_log_state: ResMut<TestChromosomeLogState>, 
+    mut test_log_state: ResMut<TestChromosomeLogState>, // Changed from _test_log_state
     vehicle_parts_query: Query<Entity, With<VehiclePart>>, // Added for despawn
 ) {
     println!("Running setup_current_vehicle_for_visualization...");
@@ -514,16 +685,20 @@ fn setup_current_vehicle_for_visualization(
 
         let vehicle_def = VehicleDefinition::new(
             &chromosome, 
-            config.initial_height_above_ground
+            &config
         );
 
         let (initial_x, initial_y) = vehicle_def.get_initial_chassis_position();
         vis_state.initial_chassis_position = Some(Vec2::new(initial_x, initial_y));
         
-        // If logging for the test chromosome, prepare the log file
         if chromosome == get_test_chromosome() {
             test_log_state.is_logging = true;
             test_log_state.step_count = 0;
+            
+            // Add a small delay before starting logging to ensure entities are spawned
+            // This prevents logging empty queries during the first few frames
+            
+            // Setup regular physics log file
             match File::create("visualization_physics_log.txt") {
                 Ok(file) => {
                     test_log_state.log_file = Some(Mutex::new(file));
@@ -532,6 +707,7 @@ fn setup_current_vehicle_for_visualization(
                         if let Ok(mut log_file_guard) = log_file_mutex.lock() {
                             writeln!(log_file_guard, "--- Visualization Physics Log: Test Chromosome ---").unwrap_or_default();
                             writeln!(log_file_guard, "Chassis Width (from chromosome): {}", chromosome.chassis.width).unwrap_or_default();
+                            writeln!(log_file_guard, "Note: Entity spawning may take a few frames, expect empty queries initially.").unwrap_or_default();
                         }
                     }
                 },
@@ -540,90 +716,105 @@ fn setup_current_vehicle_for_visualization(
                     test_log_state.log_file = None;
                 }
             }
+            // Setup debug query log file
+            match File::create("visualization_query_debug_log.txt") {
+                Ok(file) => {
+                    test_log_state.debug_log_file = Some(Mutex::new(file));
+                    println!("Created/Truncated visualization_query_debug_log.txt.");
+                    if let Some(debug_log_mutex) = &test_log_state.debug_log_file {
+                        if let Ok(mut debug_file_guard) = debug_log_mutex.lock() {
+                            writeln!(debug_file_guard, "--- Visualization Query Debug Log ---").unwrap_or_default();
+                            writeln!(debug_file_guard, "Expected chassis entity: Will be stored after spawning").unwrap_or_default();
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("FAILED to create/truncate visualization_query_debug_log.txt: {}", e);
+                    test_log_state.debug_log_file = None;
+                }
+            }
         } else {
             test_log_state.is_logging = false;
             test_log_state.log_file = None;
+            test_log_state.debug_log_file = None;
         }
 
-        // Use commands directly for spawning, as spawn_with_customizers now expects Commands
-        // Create a local version of the closure data we need to avoid borrowing issues
         let chassis_width = vehicle_def.chromosome.chassis.width;
         let chassis_height = vehicle_def.chromosome.chassis.height;
         
-        // We'll use this to store the entity ID for logging
-        let mut chassis_entity_id: Option<Entity> = None;
-        
-        // First call to spawn_with_customizers for the vehicle
         let chassis_entity = vehicle_def.spawn_with_customizers(
-            &mut commands, // Pass commands directly
+            &mut commands,
+            &config, // Pass the SimulationConfig resource
             |chassis_cmds| {
                 chassis_cmds
-                    .insert(SpriteBundle {
-                        sprite: Sprite {
-                            color: Color::rgb(0.7, 0.7, 0.8),
-                            custom_size: Some(Vec2::new(chassis_width, chassis_height)),
-                            ..default()
-                        },
-                        ..default()
-                    })
                     .insert(VehiclePart)
                     .insert(Name::new("Chassis"))
-                    .insert(Velocity::default()) // Ensure Velocity is added
-                    .insert(ReadMassProperties::default()); // Ensure mass properties are read
-                println!("[Vis Setup] Applied chassis customizer. Should have sprite, VehiclePart, Name, Velocity, ReadMassProperties.");
-            },
-            |wheel_cmds, wheel_idx, wheel_gene| {
-                let wheel_color = if wheel_gene.motor_torque > 0.0 { 
-                    Color::rgb(0.8, 0.3, 0.3) 
-                } else if wheel_gene.motor_torque < 0.0 { 
-                    Color::rgb(0.3, 0.3, 0.8) 
-                } else { 
-                    Color::rgb(0.5, 0.5, 0.5) 
-                };
-
-                wheel_cmds
-                    .insert(SpriteBundle {
-                        sprite: Sprite {
-                            color: wheel_color,
-                            custom_size: Some(Vec2::new(wheel_gene.radius * 2.0, wheel_gene.radius * 2.0)),
-                            ..default()
-                        },
+                    .insert(Sprite {
+                        color: Color::rgb(0.7, 0.7, 0.8),
+                        custom_size: Some(Vec2::new(chassis_width, chassis_height)),
                         ..default()
                     })
+                    .insert(Velocity::default());
+                println!("[Vis Setup] Applied chassis customizer. Should have VehiclePart, Name, Sprite.");
+                
+                // DIAGNOSTIC: Log what we're actually inserting
+                println!("[DIAGNOSTIC] Chassis customizer inserting: VehiclePart, Name, Sprite (NOT SpriteBundle)");
+                println!("[DIAGNOSTIC] Note: TransformBundle will be added by physics.rs spawn_with_customizers");
+            },
+            |wheel_cmds, wheel_idx, wheel_gene| {
+                wheel_cmds
                     .insert(VehiclePart)
                     .insert(VisualizedWheel { motor_gene_torque: wheel_gene.motor_torque })
                     .insert(Name::new(format!("Wheel {}", wheel_idx)))
-                    .insert(Velocity::default()); // Ensure Velocity is added
+                    .insert(Sprite {
+                        color: if wheel_gene.motor_torque > 0.0 { 
+                            Color::rgb(0.8, 0.3, 0.3) 
+                        } else if wheel_gene.motor_torque < 0.0 { 
+                            Color::rgb(0.3, 0.3, 0.8) 
+                        } else { 
+                            Color::rgb(0.5, 0.5, 0.5) 
+                        },
+                        custom_size: Some(Vec2::new(wheel_gene.radius * 2.0, wheel_gene.radius * 2.0)),
+                        ..default()
+                    })
+                    .insert(Velocity::default());
+                
+                // DIAGNOSTIC: Log what components we're adding
+                println!("[DIAGNOSTIC] Wheel {} customizer inserting: VehiclePart, VisualizedWheel, Name, Sprite", wheel_idx);
+                println!("[DIAGNOSTIC] Note: physics.rs will add Transform, RigidBody, Collider, Velocity, etc.");
                 
                 // Add wheel rotation indicator as a child
                 wheel_cmds.with_children(|parent| {
                     parent.spawn((
-                        SpriteBundle {
+                        SpriteBundle { 
                             sprite: Sprite {
                                 color: Color::BLACK,
                                 custom_size: Some(Vec2::new(wheel_gene.radius, wheel_gene.radius * 0.15)),
                                 anchor: bevy::sprite::Anchor::CenterLeft,
                                 ..default()
                             },
-                            transform: Transform::from_xyz(0.0, 0.0, 0.01), // Slightly in front of wheel
+                            transform: Transform::from_xyz(0.0, 0.0, 0.01),
                             ..default()
                         },
                         Name::new("WheelRotationIndicator"),
                     ));
                 });
-                println!("[Vis Setup] Applied wheel {} customizer. Should have sprite, VehiclePart, VisualizedWheel, Name, Velocity.", wheel_idx);
+                println!("[Vis Setup] Applied wheel {} customizer. Should have VehiclePart, VisualizedWheel, Name, Sprite.", wheel_idx);
             }
         );
+        
+        // ADDED: Store chassis entity ID in visualization state for logging
         vis_state.chassis_entity_for_logging = Some(chassis_entity);
-        println!("[Vis Setup] Spawned vehicle for visualization. Chassis entity: {:?}", chassis_entity);
+        println!("[Vis Setup] Stored chassis entity {:?} in vis_state for logging", chassis_entity);
 
     } else {
         println!("No chromosome available in CurrentVehicleChromosome resource for visualization.");
     }
 
-    // Ensure physics is running when visualization starts, unless explicitly paused by user later
-    rapier_context.integration_parameters.dt = 1.0 / 60.0; // Ensure physics is active
-    println!("Physics simulation should be active for visualization (dt={}).", rapier_context.integration_parameters.dt);
+    // REMOVED: Manual dt setting that might interfere with Bevy's fixed timestep
+    // rapier_context.integration_parameters.dt = 1.0 / 60.0; // Ensure physics is active
+    // println!("Physics simulation should be active for visualization (dt={}).", rapier_context.integration_parameters.dt);
+    println!("Physics simulation should be active for visualization.");
 }
 
 // Original despawn_vehicle_parts, called by OnExit - keeps the original signature for system registration
@@ -695,7 +886,7 @@ fn ui_system_info_panel(
     mut next_sim_mode: ResMut<NextState<SimulationMode>>,
     mut sim_speed: ResMut<SimulationSpeed>,
     mut batch_run_config: ResMut<BatchRunConfig>,
-    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
+    _test_log_state: ResMut<TestChromosomeLogState>, 
 ) {
     egui::Window::new("Simulation Info & Controls").show(contexts.ctx_mut(), |ui| {
         ui.label(format!("Current Mode: {:?}", sim_mode.get()));
@@ -742,6 +933,7 @@ fn ui_system_info_panel(
             } else {
                 batch_run_config.target_generations_this_batch = None;
                 batch_run_config.generations_completed_this_batch = 0;
+                batch_run_config.log_this_batch_intensively = false;
                 next_sim_mode.set(SimulationMode::RunningFast);
             }
         }
@@ -791,20 +983,21 @@ fn ui_system_info_panel(
         ui.separator();
 
         ui.label("Run Specific Number of Generations:");
-        let run_batch = |gens: usize, batch_config: &mut BatchRunConfig, next_mode: &mut NextState<SimulationMode>| {
+        let run_batch = |gens: usize, intensive_log: bool, batch_config: &mut BatchRunConfig, next_mode: &mut NextState<SimulationMode>| {
             batch_config.target_generations_this_batch = Some(gens);
             batch_config.generations_completed_this_batch = 0;
+            batch_config.log_this_batch_intensively = intensive_log;
             next_mode.set(SimulationMode::RunningFast);
         };
 
-        if ui.button("Run 1 Gen").clicked() {
-            run_batch(1, &mut batch_run_config, &mut next_sim_mode);
+        if ui.button("Run 1 Gen (Log All Steps)").clicked() {
+            run_batch(1, true, &mut batch_run_config, &mut next_sim_mode);
         }
         if ui.button("Run 5 Gens").clicked() {
-            run_batch(5, &mut batch_run_config, &mut next_sim_mode);
+            run_batch(5, false, &mut batch_run_config, &mut next_sim_mode);
         }
         if ui.button("Run 10 Gens").clicked() {
-            run_batch(10, &mut batch_run_config, &mut next_sim_mode);
+            run_batch(10, false, &mut batch_run_config, &mut next_sim_mode);
         }
 
         ui.separator();
@@ -824,9 +1017,11 @@ fn configure_physics(
     // Set gravity to match SimulationConfig
     rapier_config.gravity = Vec2::new(0.0, config.gravity);
     rapier_config.physics_pipeline_active = true;
-    // rapier_config.velocity_solver_iterations = 8; // REMOVED - Does not exist on this type
     
-    println!("Physics configured: gravity=({}, {}), Rapier default solver iterations used", rapier_config.gravity.x, rapier_config.gravity.y);
+    println!(
+        "RapierConfiguration updated: gravity=({:.2}, {:.2})", 
+        rapier_config.gravity.x, rapier_config.gravity.y
+    );
 }
 
 // New system to record initial chassis position after spawning
@@ -885,98 +1080,26 @@ fn step_vehicle_visualization_simulation(
     config: Res<SimulationConfig>,
     time: Res<Time<Fixed>>,
     // Query for all wheels with their relevant components for logging and potential actions
-    wheel_query_for_log: Query<(&Transform, &Velocity, &Name, &VisualizedWheel), With<VehiclePart>>,
-    // Query for the chassis for logging
-    chassis_query_for_log: Query<(&Transform, &Velocity), (With<VehiclePart>, Without<VisualizedWheel>)>,
-    // _all_visualized_wheels_query: Query<(Entity, &Name, &Transform), With<VisualizedWheel>>, // Keep for now, maybe remove later if unused
+    // wheel_query_for_log: Query<(&Transform, &Velocity, &Name, &VisualizedWheel), With<VehiclePart>>,
+    // MODIFIED: Query for the chassis for logging, now includes Entity
+    chassis_query_for_log: Query<(Entity, &Transform, &Velocity), (With<VehiclePart>, Without<VisualizedWheel>)>,
     _next_sim_mode: ResMut<NextState<SimulationMode>>,
     mut distance_data: ResMut<DistanceComparisonData>,
-    mut test_log_state: ResMut<TestChromosomeLogState>, // Added for logging
-    // world: &World, // Removed world, use queries instead
-    // For specific entity access if needed, though queries are preferred:
-    // Optional: Query for specific chassis entity if ID is stored and direct access is simpler than iterating a query
-    // specific_chassis_query: Query<(Entity, &Transform, &Velocity), (With<Name>, With<VehiclePart>, Without<VisualizedWheel>)>,
+    mut test_log_state: ResMut<TestChromosomeLogState>,
+    rapier_context: Res<RapierContext>, // ADDED: To check physics timestep
 ) {
-    // Only log if physics is not paused (includes both normal running and single step)
-    if vis_state.is_simulating_current_vehicle && (!vis_state.is_physics_paused || vis_state.single_step_requested) {
-        //println!("--- step_vehicle_visualization_simulation SYSTEM CALLED ---"); // DEBUG PRINT
-
-        // Log physics state if it's the test chromosome run
-        if test_log_state.is_logging {
-            let current_step_for_log = test_log_state.step_count; // Read step_count first
-
-            if let Some(mutex_file) = &test_log_state.log_file {
-                if let Ok(mut file) = mutex_file.lock() {
-                    writeln!(file, "--- Step {} ---", current_step_for_log).unwrap_or_default();
-                    // test_log_state.step_count += 1; // Moved increment outside lock
-
-                    // Querying for chassis for logging
-                    if let Some(chassis_entity_id) = vis_state.chassis_entity_for_logging {
-                        // Try to get the specific chassis entity using its ID
-                        // This requires a query that can fetch the specific entity.
-                        // A more robust way might be to iterate `chassis_query_for_log` and find the one matching the ID,
-                        // or ensure `chassis_query_for_log` only ever contains one chassis.
-                        // For simplicity, if chassis_query_for_log.get_single() is reliable for the chassis:
-                        if let Ok((transform, velocity)) = chassis_query_for_log.get_single() {
-                            // Assuming the chassis_entity_id in vis_state correctly identifies this single entity
-                            let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", velocity.linvel.x, velocity.linvel.y, velocity.angvel);
-                            log_line_viz(&mut *file, format!("  Chassis (E {:?}): pos=({:.4}, {:.4}), rot={:.4}, {}", 
-                                chassis_entity_id, transform.translation.x, transform.translation.y, transform.rotation.to_euler(EulerRot::ZYX).0, vel_info));
-                        } else {
-                            // Fallback or more specific query if get_single() fails or is not appropriate
-                            // Example: iterate if there could be multiple VehiclePart without VisualizedWheel
-                            let mut found_logged_chassis = false;
-                            for (transform, velocity) in chassis_query_for_log.iter() {
-                                // This part needs a reliable way to identify THE chassis if there are multiple entities
-                                // matching chassis_query_for_log. If vis_state.chassis_entity_for_logging is the EntityCommands.id()
-                                // we would need to query for Entity as well to match.
-                                // For now, assuming chassis_query_for_log.get_single() is the primary way.
-                                // This fallback is if get_single() fails and we just log the first one.
-                                if !found_logged_chassis { // Log first one if single failed.
-                                     let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", velocity.linvel.x, velocity.linvel.y, velocity.angvel);
-                                     log_line_viz(&mut *file, format!("  Chassis (Fallback, E {:?}): pos=({:.4}, {:.4}), rot={:.4}, {}", 
-                                        chassis_entity_id, transform.translation.x, transform.translation.y, transform.rotation.to_euler(EulerRot::ZYX).0, vel_info));
-                                     found_logged_chassis = true; // Log only one if using this fallback
-                                }
-                            }
-                            if !found_logged_chassis {
-                                log_line_viz(&mut *file, format!("  Chassis (E {:?}): Not found via get_single() or in general iteration.", chassis_entity_id));
-                            }
-                        }
-                    } else {
-                        log_line_viz(&mut *file, "  Chassis: Entity ID not stored in VisualizationState");
-                    }
-
-                    // Logging wheels
-                    for (transform, velocity, name, wheel_marker) in wheel_query_for_log.iter() {
-                        let vel_info = format!(
-                            "linvel=({:.4}, {:.4}), angvel={:.4}",
-                            velocity.linvel.x, velocity.linvel.y, velocity.angvel
-                        );
-                        log_line_viz(
-                            &mut *file, 
-                            format!(
-                                "  Wheel '{}' (Marker Torque: {:.3}): pos=({:.4}, {:.4}), rot={:.4}, {}", 
-                                name.as_str(), 
-                                wheel_marker.motor_gene_torque, 
-                                transform.translation.x, 
-                                transform.translation.y, 
-                                transform.rotation.to_euler(EulerRot::ZYX).0, 
-                                vel_info
-                            )
-                        );
-                    }
-                }
-            } else if test_log_state.is_logging { // Log file was None, but logging was intended
-                eprintln!("Error: Test chromosome logging active, but log_file is None in step_vehicle_visualization_simulation.");
-            }
-        }
-        if test_log_state.is_logging { // Increment step_count after file operations
-            test_log_state.step_count += 1;
-        }
-    }
-    
+    // Only log to file, remove console debug logging since file logging works now
     if vis_state.is_simulating_current_vehicle {
+        // ADDED: Log physics stepping details for test chromosome
+        if test_log_state.is_logging && test_log_state.step_count % 60 == 0 {
+            println!("[Visualization] Step {}, Time<Fixed> elapsed: {:.4}s, vis_state.current_simulation_time: {:.4}s", 
+                test_log_state.step_count, time.elapsed_seconds(), vis_state.current_simulation_time);
+            
+            // ADDED: Log actual physics timestep being used
+            println!("[Visualization] Physics dt: {:.6}, Time<Fixed> delta: {:.6}", 
+                rapier_context.integration_parameters.dt, time.delta_seconds());
+        }
+        
         // Only increment simulation time if physics is not paused or we're doing a single step
         if !vis_state.is_physics_paused || vis_state.single_step_requested {
             // Torque application to wheels is now handled by joint motors in Bevy Rapier for visualized entities.
@@ -993,10 +1116,10 @@ fn step_vehicle_visualization_simulation(
                 
                 // Calculate and update distance data
                 let mut chassis_pos = None;
-                // Let's get the chassis position specifically from a query that gives transforms, not velocities
-                for (transform, _) in chassis_query_for_log.iter() {
+                // MODIFIED: Correctly destructure the 3-tuple from the query
+                for (_entity, transform, _velocity) in chassis_query_for_log.iter() {
                     chassis_pos = Some(Vec2::new(transform.translation.x, transform.translation.y));
-                    break;
+                    break; // Found the chassis, no need to iterate further
                 }
                 
                 if let (Some(initial_pos), Some(current_pos), Some(expected)) = (vis_state.initial_chassis_position, chassis_pos, vis_state.expected_fitness) {
@@ -1024,72 +1147,151 @@ fn step_vehicle_visualization_simulation(
 }
 
 // New system to configure Rapier parameters to match headless simulation
-fn configure_rapier_params(mut rapier_context: ResMut<RapierContext>) {
+fn configure_rapier_params(
+    mut rapier_context: ResMut<RapierContext>,
+    config: Res<SimulationConfig>
+) {
     // Access the underlying Rapier configuration
     let context = rapier_context.as_mut();
     
-    // Set parameters to match headless simulation
-    context.integration_parameters.erp = 0.01; // Changed to 0.01
-    context.integration_parameters.joint_erp = 0.01; // Changed to 0.01
-    // num_solver_iterations is handled by RapierConfiguration or defaults
+    // MODIFIED: Set parameters from SimulationConfig to match headless simulation
+    context.integration_parameters.erp = config.erp; 
+    context.integration_parameters.joint_erp = config.joint_erp;
+    context.integration_parameters.max_velocity_iterations = config.solver_iterations;
+    // Note: simulation.rs also doesn't set max_position_iterations due to previous errors, assuming default is fine or covered by velocity.
     
-    // Log that we've configured integration parameters
-    println!("Rapier integration parameters configured: erp=0.01, joint_erp=0.01");
+    println!(
+        "Rapier integration_parameters configured: erp={}, joint_erp={}, max_vel_iters={}",
+        context.integration_parameters.erp, 
+        context.integration_parameters.joint_erp,
+        context.integration_parameters.max_velocity_iterations
+    );
 }
 
 fn handle_test_chassis_logging(
     mut test_log_state: ResMut<TestChromosomeLogState>,
-    _rapier_context: Res<RapierContext>,
-    vis_state: Res<VisualizationState>,
-    chassis_query: Query<(&Transform, &Velocity), (With<VehiclePart>, Without<VisualizedWheel>)>,
-    _time: Res<Time>,
+    _vis_state: Res<VisualizationState>, 
+    // MODIFIED: Add Velocity back for debugging physics issues
+    chassis_query: Query<(&Transform, &Name, Option<&Velocity>)>,
+    // NEW: Add Velocity back for wheel debugging  
+    wheel_query: Query<(&Transform, &Name, Option<&VisualizedWheel>, Option<&Velocity>)>,
+    // Keep the all entities query for debugging
+    all_named_entities: Query<(Entity, &Name)>,
+    time: Res<Time>, 
 ) {
-    if test_log_state.is_logging {
-        // Increment step count
-        test_log_state.step_count += 1;
-        
-        // Log to file
-        if let Some(mutex_file) = &test_log_state.log_file {
-            if let Ok(mut file) = mutex_file.lock() {
-                writeln!(file, "--- Step {} ---", test_log_state.step_count - 1).unwrap_or_default();
+    if !test_log_state.is_logging {
+        return; 
+    }
+
+    let current_log_step = test_log_state.step_count;
+    test_log_state.step_count += 1;
+
+    // Skip logging for the first few steps to allow entities to be properly spawned
+    if current_log_step < 5 {
+        return;
+    }
+
+    // Only log every ~10th step since this now runs in Update (much faster than FixedUpdate)
+    // DISABLED for high-resolution debugging: Log every step now
+    // if current_log_step % 10 != 0 {
+    //     return;
+    // }
+
+    // --- Query Debug Logging --- 
+    if test_log_state.debug_log_file.is_some() {
+        if let Some(debug_mutex) = &test_log_state.debug_log_file {
+            if let Ok(mut debug_file) = debug_mutex.lock() {
+                writeln!(debug_file, "--- Query Debug: Step {} (Time: {:.2}s) ---", current_log_step, time.elapsed_seconds()).unwrap_or_default();
                 
-                let mut found_chassis = false;
+                // Query ALL entities with Name to see what exists
+                let all_entities: Vec<_> = all_named_entities.iter().collect(); 
+                writeln!(debug_file, "  Found {} total entities with Name:", all_entities.len()).unwrap_or_default();
+                for (entity, name) in all_entities.iter().take(10) { // Limit to first 10
+                    writeln!(debug_file, "    Entity {:?}: Name=\"{}\"", entity, name.as_str()).unwrap_or_default();
+                }
                 
-                // Try to find the chassis using the entity ID
-                if let Some(chassis_entity) = vis_state.chassis_entity_for_logging {
-                    if let Ok((transform, velocity)) = chassis_query.get(chassis_entity) {
-                        let chassis_pos = transform.translation;
-                        let chassis_rot = transform.rotation.to_euler(EulerRot::XYZ).2; // Extract Euler Z rotation (2D)
+                // NEW: Check specific entities for components
+                for (entity, name) in all_entities.iter() {
+                    if name.as_str() == "Chassis" || name.as_str().starts_with("Wheel") {
+                        writeln!(debug_file, "  Checking entity {:?} (Name: \"{}\")", entity, name.as_str()).unwrap_or_default();
                         
-                        // Log chassis state
-                        writeln!(file, "Chassis: pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}", 
-                            chassis_pos.x, chassis_pos.y, chassis_rot,
-                            velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
+                        // Check if it has Transform, Velocity components using direct queries
+                        let has_transform = chassis_query.iter().any(|(_, n, _)| n.as_str() == name.as_str());
+                        let has_velocity = wheel_query.iter().any(|(_, n, _, v)| n.as_str() == name.as_str() && v.is_some());
                         
-                        found_chassis = true;
+                        writeln!(debug_file, "    Has Transform+Name: {}", has_transform).unwrap_or_default();
+                        writeln!(debug_file, "    Found in wheel_query: {}", has_velocity).unwrap_or_default();
                     }
                 }
                 
-                // Fallback: if we couldn't find the chassis by entity ID, try to find any chassis
-                if !found_chassis {
-                    for (transform, velocity) in chassis_query.iter() {
-                        let chassis_pos = transform.translation;
-                        let chassis_rot = transform.rotation.to_euler(EulerRot::XYZ).2; // Extract Euler Z rotation (2D)
-                        
-                        // Log chassis state
-                        writeln!(file, "Chassis (fallback): pos=({:.4}, {:.4}), rot={:.4}, linvel=({:.4}, {:.4}), angvel={:.4}", 
-                            chassis_pos.x, chassis_pos.y, chassis_rot,
-                            velocity.linvel.x, velocity.linvel.y, velocity.angvel).unwrap_or_default();
-                        
-                        found_chassis = true;
-                        break; // Only log the first chassis
-                    }
-                }
+                // Try to find entities by name
+                let chassis_entities: Vec<_> = chassis_query.iter().filter(|(_, name, _)| name.as_str() == "Chassis").collect();
+                writeln!(debug_file, "  Found {} chassis entities by name:", chassis_entities.len()).unwrap_or_default();
                 
-                if !found_chassis {
-                    writeln!(file, "Chassis: NOT FOUND").unwrap_or_default();
+                let wheel_entities: Vec<_> = wheel_query.iter().filter(|(_, name, _, _)| name.as_str().starts_with("Wheel")).collect();
+                writeln!(debug_file, "  Found {} wheel entities by name:", wheel_entities.len()).unwrap_or_default();
+            } 
+        }
+    } 
+    
+    // --- Regular Physics State Logging ---     
+    if let Some(mutex_file) = &test_log_state.log_file {
+        if let Ok(mut file) = mutex_file.lock() {
+            writeln!(file, "--- Step {} ---", current_log_step).unwrap_or_default();
+            
+            let mut chassis_logged_this_step = false;
+            // Find the chassis by name
+            for (transform, name, velocity) in chassis_query.iter() { 
+                if name.as_str() == "Chassis" {
+                    let vel_info = match velocity {
+                        Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                                            vel.linvel.x, vel.linvel.y, vel.angvel),
+                        None => "NO VELOCITY COMPONENT".to_string()
+                    };
+                    
+                    log_line_viz(
+                        &mut *file, 
+                        format!(
+                            "  Chassis (Name): pos=({:.4}, {:.4}), rot={:.4}, {}", 
+                            transform.translation.x, transform.translation.y, 
+                            transform.rotation.to_euler(EulerRot::ZYX).0,
+                            vel_info
+                        )
+                    );
+                    chassis_logged_this_step = true;
+                    break; 
                 }
             }
+            
+            if !chassis_logged_this_step {
+                log_line_viz(&mut *file, format!("  Chassis: NOT FOUND by name."));
+            }
+
+            // Log wheels by name
+            for (transform, name, wheel_marker, velocity) in wheel_query.iter() {
+                if name.as_str().starts_with("Wheel") {
+                    let vel_info = match velocity {
+                        Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                                            vel.linvel.x, vel.linvel.y, vel.angvel),
+                        None => "NO VELOCITY COMPONENT".to_string()
+                    };
+                    
+                    log_line_viz(
+                        &mut *file, 
+                        format!(
+                            "  Wheel '{}' (GeneTorque: {:.2}): pos=({:.4}, {:.4}), rot={:.4}, {}", 
+                            name.as_str(), 
+                            wheel_marker.map_or(0.0, |w| w.motor_gene_torque), 
+                            transform.translation.x, 
+                            transform.translation.y, 
+                            transform.rotation.to_euler(EulerRot::ZYX).0,
+                            vel_info
+                        )
+                    );
+                }
+            }
+        } else {
+            eprintln!("[handle_test_chassis_logging] Failed to lock log file.");
         }
     }
 }

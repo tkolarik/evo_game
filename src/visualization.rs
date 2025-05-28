@@ -35,7 +35,8 @@ pub struct VisualizationState {
     // For distance tracking and comparison
     pub initial_chassis_position: Option<Vec2>,
     pub expected_fitness: Option<f32>,
-    // Add other state controls like simulation speed factor
+    pub auto_stop_visualization: bool, // New flag: true to automatically stop visualization after sim_duration_secs
+    pub chassis_entity_for_logging: Option<Entity>, // Added to store chassis entity for logging
 }
 
 impl Default for VisualizationState {
@@ -49,6 +50,8 @@ impl Default for VisualizationState {
             use_debug_vehicle: false, // Default to not using debug vehicle
             initial_chassis_position: None,
             expected_fitness: None,
+            auto_stop_visualization: true, // Default to auto-stopping for fair comparison
+            chassis_entity_for_logging: None,
         }
     }
 }
@@ -92,7 +95,7 @@ pub fn spawn_vehicle_visualization(
 
         let vehicle_def = VehicleDefinition::new(
             chromosome, 
-            config.initial_height_above_ground
+            &config 
         );
 
         let (initial_x, initial_y) = vehicle_def.get_initial_chassis_position();
@@ -100,6 +103,7 @@ pub fn spawn_vehicle_visualization(
 
         let _chassis_entity = vehicle_def.spawn_with_customizers(
             &mut commands,
+            &config,
             |chassis_cmds| {
                 chassis_cmds
                     .insert(SpriteBundle {

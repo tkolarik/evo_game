@@ -1,8 +1,7 @@
 use crate::organism::{Chromosome, get_test_chromosome};
 use crate::physics::{
-    PhysicsParameters, 
+    VehicleDefinition, GroundDefinition,
     GROUP_GROUND, GROUND_FILTER, 
-    VehicleDefinition, GroundDefinition
 };
 use bevy::prelude::*;
 // use bevy::app::CoreSchedule; // Removed unused import
@@ -40,48 +39,54 @@ macro_rules! sim_log {
 
 // Placeholder for physics world details
 pub struct PhysicsWorld {
-    physics_parameters: PhysicsParameters,
+    // Removed physics_parameters field, as SimulationConfig will be used directly or passed around.
 }
 
 impl PhysicsWorld {
-    pub fn new(config: &SimulationConfig) -> Self {
-        // Create physics parameters
-        let physics_params = PhysicsParameters {
-            gravity: config.gravity,
-            ground_friction: config.ground_friction,
-            ground_restitution: 0.0,
-            erp: 0.01, // Unified value from testing
-            joint_erp: 0.01, // Unified value from testing
-            solver_iterations: 4,
-        };
-        
-        Self {
-            physics_parameters: physics_params,
-        }
+    pub fn new(_config: &SimulationConfig) -> Self { // config might be used later if PhysicsWorld needs to store parts of it
+        // PhysicsParameters struct is removed. Its values are now in SimulationConfig.
+        // RapierConfiguration and other direct physics settings will be applied in evaluate_fitness
+        // or by systems directly using SimulationConfig.
+        Self {}
     }
 
-    pub fn evaluate_fitness(&mut self, chromosome: &Chromosome, config: &SimulationConfig) -> f32 {
+    pub fn evaluate_fitness(&mut self, chromosome: &Chromosome, config: &SimulationConfig, force_intensive_logging: bool) -> f32 {
         let test_chromosome = get_test_chromosome();
-        let is_test_run = *chromosome == test_chromosome;
+        let effective_is_test_run = (*chromosome == test_chromosome) || force_intensive_logging;
 
-        if is_test_run {
-            println!("HEADLESS: evaluate_fitness called FOR TEST CHROMOSOME.");
+        if effective_is_test_run {
+            println!("HEADLESS: evaluate_fitness called. Chromosome is test_chromosome: {}, force_intensive_logging: {}. Logging all steps.", 
+                     *chromosome == test_chromosome, force_intensive_logging);
         }
 
-        let mut initial_log_file_handle: Option<File> = if is_test_run {
-            println!("HEADLESS: Attempting to create/truncate headless_physics_log.txt");
-            let log_path_str = "headless_physics_log.txt";
-            match File::create(log_path_str) { 
+        let mut initial_log_file_handle: Option<File> = if effective_is_test_run {
+            println!("HEADLESS: Attempting to create/truncate headless_main_log.txt");
+            let main_log_path_str = "headless_main_log.txt";
+            match File::create(main_log_path_str) { 
                 Ok(mut file) => {
-                    let abs_path = PathBuf::from(log_path_str).canonicalize().unwrap_or_else(|_| PathBuf::from(log_path_str));
-                    println!("[SUCCESS] Created/Truncated headless_physics_log.txt at {:?}", abs_path);
+                    let abs_path = PathBuf::from(main_log_path_str).canonicalize().unwrap_or_else(|_| PathBuf::from(main_log_path_str));
+                    println!("[SUCCESS] Created/Truncated {} at {:?}", main_log_path_str, abs_path);
                     // These initial writes still go direct to the handle before it's put in resource
-                    writeln!(file, "--- Headless Physics Log: Test Chromosome ---").unwrap_or_default();
+                    writeln!(file, "--- Headless Physics Log (Main): Test Chromosome ---").unwrap_or_default();
                     writeln!(file, "Chassis Width (from chromosome): {}", chromosome.chassis.width).unwrap_or_default();
-                    Some(file)
+                    
+                    // Also create/truncate the periodic log file
+                    let periodic_log_path_str = "headless_periodic_state_log.txt";
+                    match File::create(periodic_log_path_str) {
+                        Ok(_) => {
+                            let periodic_abs_path = PathBuf::from(periodic_log_path_str).canonicalize().unwrap_or_else(|_| PathBuf::from(periodic_log_path_str));
+                            println!("[SUCCESS] Created/Truncated {} at {:?}", periodic_log_path_str, periodic_abs_path);
+                            // No initial write needed here, log_simulation_state_periodically will handle its headers
+                        },
+                        Err(e) => {
+                            eprintln!("[!!!! CRITICAL ERROR !!!!] FAILED to create/truncate {}: {}", periodic_log_path_str, e);
+                            // Potentially decide if main log creation should also fail or proceed with caution
+                        }
+                    }
+                    Some(file) // Return the main log file handle
                 },
                 Err(e) => {
-                    eprintln!("[!!!! CRITICAL ERROR !!!!] FAILED to create/truncate headless_physics_log.txt: {}", e);
+                    eprintln!("[!!!! CRITICAL ERROR !!!!] FAILED to create/truncate {}: {}", main_log_path_str, e);
                     None
                 }
             }
@@ -96,51 +101,49 @@ impl PhysicsWorld {
         app.insert_resource(log_file_resource); // Now the resource is available
         
         app.add_plugins(MinimalPlugins)
-           .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
-           .insert_resource(RapierConfiguration {
-                gravity: Vec2::new(0.0, self.physics_parameters.gravity),
+           .add_plugins(RapierPhysicsPlugin::<NoUserData>::default()) // Consider ::pixels_per_meter(1.0) if visual uses it for identical setup
+           .insert_resource(RapierConfiguration { // MODIFIED: Only set gravity here
+                gravity: Vec2::new(0.0, config.gravity),
+                // solver_iterations, erp, joint_erp will be set via RapierContext.integration_parameters
                 ..Default::default()
            })
-           .insert_resource(self.physics_parameters.clone());
-        
-        // Insert SimulationConfig as a resource
-        app.insert_resource(config.clone());
+           .insert_resource(config.clone())
         
         // Track simulation metrics using a resource
-        app.insert_resource(SimulationMetrics::default());
+           .insert_resource(SimulationMetrics::default()) // Chained this call
         
         // Configure fixed timestep to match visualization
-        app.insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0));
+           .insert_resource(Time::<Fixed>::from_seconds(1.0 / 60.0)) // Chained this call
         
         // Store simulation parameters
-        app.insert_resource(HeadlessSimulationParams {
+           .insert_resource(HeadlessSimulationParams {
             chromosome: chromosome.clone(),
             initial_height: config.initial_height_above_ground,
-            is_test_run,
-        });
+            is_test_run: effective_is_test_run,
+           })
         
         // Add the logging system here, it will manage its own conditions
-        app.insert_resource(LoggingConfig {
-            is_test_run,
-            log_interval_steps: 10, // MODIFIED: Log every 10 steps (about 6 times per second at 60fps)
+           .insert_resource(LoggingConfig {
+            is_test_run: effective_is_test_run,
+            log_interval_steps: if effective_is_test_run { 10 } else { 10 },
             current_step: 0,
-        });
+           });
         
         // Initialize QueryStates once before they are used by systems
         // These are now primarily for the final log, periodic will use live queries.
-        let mut chassis_query_state_for_final_log = app.world.query_filtered::<(&Transform, Option<&Velocity>), With<HeadlessChassis>>();
-        let mut wheel_query_state_for_final_log = app.world.query_filtered::<(&Transform, &HeadlessWheel, Option<&Velocity>), ()>();
+        let mut chassis_query_state_for_final_log = app.world.query_filtered::<(&Transform, &Velocity), With<HeadlessChassis>>();
+        let mut wheel_query_state_for_final_log = app.world.query_filtered::<(&Transform, &HeadlessWheel, &Velocity), ()>();
 
         // Add system to configure Rapier integration parameters after setup
         // app.add_systems(Startup, configure_headless_rapier_parameters.after(setup_headless_simulation));
-        app.add_systems(PostStartup, configure_headless_rapier_parameters); // Try PostStartup
+        app.add_systems(PostStartup, configure_headless_rapier_parameters); // Try PostStartup. Semicolon added if needed by style, but often not for single system line.
 
         // Add systems for simulation
         app.add_systems(Startup, setup_headless_simulation)
            .add_systems(FixedUpdate, (
                 update_simulation_metrics, 
                 log_simulation_state_periodically
-            ));
+            )); // Semicolon added
         
         // Run the main schedule once to execute Startup systems and apply their commands.
         // This also runs PostStartup systems like configure_headless_rapier_parameters.
@@ -156,22 +159,34 @@ impl PhysicsWorld {
         let mut actual_steps_executed = 0;
         let fixed_time_delta_duration = std::time::Duration::from_secs_f64(1.0 / 60.0);
         
-        for _ in 0..sim_steps {
+        // ADDED: Log simulation parameters - get fresh reference
+        {
+            let maybe_log_res = app.world.get_resource::<HeadlessLogFile>();
+            sim_log!(maybe_log_res, "[LOG Sim|EvalFit] Starting simulation loop: sim_duration_secs={}, sim_steps={}, dt={}", 
+                config.sim_duration_secs, sim_steps, 1.0 / 60.0);
+        }
+        
+        for step in 0..sim_steps {
+            // ADDED: Log step details periodically
+            if effective_is_test_run && step % 60 == 0 {
+                // FIXED: Get log resource reference inside the condition to avoid borrowing issues
+                let maybe_log_res = app.world.get_resource::<HeadlessLogFile>();
+                sim_log!(maybe_log_res, "[LOG Sim|EvalFit] Step {}/{}, Time<Fixed> before advance: elapsed={:.4}s", 
+                    step, sim_steps, app.world.resource::<Time<Fixed>>().elapsed_seconds());
+            }
+            
             // Manually advance Time<Fixed> internal state and then run FixedUpdate schedule.
             app.world.resource_scope(|_world, mut time_fixed: Mut<Time<Fixed>>| {
                 time_fixed.advance_by(fixed_time_delta_duration);
             });
-            app.world.run_schedule(FixedUpdate);
-
-            // We might still need to run the main schedule for other things if systems rely on it (e.g. PostUpdate)
-            // For a minimal Rapier setup, FixedUpdate might be enough. Let's test this first.
-            // If PostUpdate systems are needed (e.g. for query state sync before logging), we might need app.update() or parts of it.
-            // For now, assume FixedUpdate is sufficient to drive physics and update transforms for logging.
-            // app.update(); // Comment out for now to see if FixedUpdate alone is enough
+            
+            // CRITICAL FIX: Run the full app.update() to process Rapier physics
+            // The FixedUpdate alone is insufficient for Rapier physics to work properly
+            app.update();
 
             actual_steps_executed += 1;
             // Increment logging step counter if in test run
-            if is_test_run {
+            if effective_is_test_run {
                 if let Some(mut logging_config) = app.world.get_resource_mut::<LoggingConfig>() {
                     logging_config.current_step += 1;
                 }
@@ -275,14 +290,14 @@ fn setup_headless_simulation(
     mut commands: Commands,
     params: Res<HeadlessSimulationParams>,
     mut metrics: ResMut<SimulationMetrics>,
-    physics_params_res: Res<PhysicsParameters>,
-    config: Res<SimulationConfig>,
+    config: Res<SimulationConfig>, // ADDED
     log_file: Option<Res<HeadlessLogFile>> // Add log file resource
 ) {
     let chromosome = &params.chromosome;
     sim_log!(log_file, "[LOG Sim|Setup] Running setup_headless_simulation for chromosome width: {}", chromosome.chassis.width);
     
-    let ground_def = GroundDefinition::new(&physics_params_res);
+    // MODIFIED: Create GroundDefinition using config
+    let ground_def = GroundDefinition::new(&config);
     commands.spawn((
         TransformBundle::from(Transform::from_xyz(0.0, ground_def.get_ground_center_y(), 0.0)),
         Collider::cuboid(ground_def.half_width, ground_def.half_thickness),
@@ -292,25 +307,26 @@ fn setup_headless_simulation(
         Name::new("HeadlessGround"),
     ));
     
-    // Create vehicle using VehicleDefinition and the new spawner
-    let vehicle_def = VehicleDefinition::new(chromosome, config.initial_height_above_ground);
+    // MODIFIED: Use the same VehicleDefinition spawning as rendered mode
+    let vehicle_def = VehicleDefinition::new(chromosome, &config);
     let (initial_chassis_x, initial_chassis_y) = vehicle_def.get_initial_chassis_position();
 
     let chassis_entity_id = vehicle_def.spawn_with_customizers(
         &mut commands,
+        &config, // ADDED: Pass config to spawn_with_customizers
         |chassis_cmds| {
-            println!("[LOG Sim|Setup] Customizing chassis entity..."); 
+            sim_log!(log_file, "[LOG Sim|Setup] Customizing chassis entity..."); 
             chassis_cmds
                 .insert(HeadlessVehiclePart)
                 .insert(HeadlessChassis)
                 .insert(Name::new("Chassis"))
-                .insert(Velocity::default())
+                .insert(Velocity::default())  // CRITICAL: Add Velocity component
                 .insert(ExternalImpulse::default()); // Add ExternalImpulse for force application
             
-            println!("[LOG Sim|Setup] Chassis components (HeadlessVehiclePart, HeadlessChassis, Name, Velocity) should be added.");
+            sim_log!(log_file, "[LOG Sim|Setup] Chassis components (HeadlessVehiclePart, HeadlessChassis, Name, Velocity) should be added.");
         },
         |wheel_cmds, wheel_idx, wheel_gene| {
-            println!("[LOG Sim|Setup] Customizing wheel {}...", wheel_idx); // Stays as println!
+            sim_log!(log_file, "[LOG Sim|Setup] Customizing wheel {}...", wheel_idx); // Stays as println!
             wheel_cmds
                 .insert(HeadlessVehiclePart)
                 .insert(HeadlessWheel { 
@@ -318,10 +334,12 @@ fn setup_headless_simulation(
                     motor_torque: wheel_gene.motor_torque, 
                 })
                 .insert(Name::new(format!("Wheel {}", wheel_idx)))
-                .insert(Velocity::default())
+                .insert(Velocity::default())  // CRITICAL: Add Velocity component
                 .insert(ExternalImpulse::default()); // Add ExternalImpulse for torque application
             
-            println!("[LOG Sim|Setup] Wheel {} components should be added.", wheel_idx); // Stays as println!
+            sim_log!(log_file, "[LOG Sim|Setup] Wheel {} components should be added.", wheel_idx); // Stays as println!
+            // ADDED: Log wheel motor torque for debugging
+            sim_log!(log_file, "[LOG Sim|Setup] Wheel {} motor_torque from gene: {:.4}", wheel_idx, wheel_gene.motor_torque);
         }
     );
     sim_log!(log_file, "[LOG Sim|Setup] Chassis entity ID from spawn_with_customizers: {:?}", chassis_entity_id);
@@ -333,7 +351,7 @@ fn setup_headless_simulation(
 // System to update simulation metrics
 fn update_simulation_metrics(
     mut metrics: ResMut<SimulationMetrics>,
-    chassis_query: Query<(Entity, &Transform, Option<&Velocity>), With<HeadlessChassis>>,
+    chassis_query: Query<(Entity, &Transform, &Velocity), With<HeadlessChassis>>, // ADDED: Include Velocity
     _part_query: Query<&Transform, With<HeadlessVehiclePart>>,
     log_file: Option<Res<HeadlessLogFile>>, // Add log file resource
     logging_config: Option<Res<LoggingConfig>> // Add logging config to check current_step
@@ -347,11 +365,8 @@ fn update_simulation_metrics(
     
     if let Ok((entity, chassis_transform, chassis_velocity)) = chassis_query.get_single() {
         if should_log_verbose {
-            let vel_info = match chassis_velocity {
-                Some(vel) => format!("Velocity: linvel=({:.4}, {:.4}), angvel={:.4}", 
-                                vel.linvel.x, vel.linvel.y, vel.angvel),
-                None => "NO VELOCITY COMPONENT".to_string()
-            };
+            let vel_info = format!("Velocity: linvel=({:.4}, {:.4}), angvel={:.4}", 
+                            chassis_velocity.linvel.x, chassis_velocity.linvel.y, chassis_velocity.angvel);
             
             sim_log!(log_file, "[LOG Sim|Metrics] Chassis entity {:?} FOUND. Transform: {:?}, {}", 
                     entity, chassis_transform.translation, vel_info);
@@ -391,8 +406,8 @@ fn log_simulation_state_periodically(
     _params_res: Res<HeadlessSimulationParams>, 
     _metrics_res: Res<SimulationMetrics>,
     time_res: Res<Time<Fixed>>, 
-    chassis_q: Query<(&Transform, Option<&Velocity>), With<HeadlessChassis>>, 
-    wheel_q: Query<(&Transform, &HeadlessWheel, Option<&Velocity>)>, 
+    chassis_q: Query<(&Transform, &Velocity), With<HeadlessChassis>>, 
+    wheel_q: Query<(&Transform, &HeadlessWheel, &Velocity)>, 
     log_file: Option<Res<HeadlessLogFile>> // Add log file resource for debug messages
 ) {
     // Debug: Always log whether this system is running
@@ -403,10 +418,10 @@ fn log_simulation_state_periodically(
         // DEBUG: This check passed, now we'll log
         sim_log!(log_file, "[DEBUG] Periodic log condition met: step {}, interval {}", logging_config.current_step, logging_config.log_interval_steps);
 
-        match File::options().append(true).open("headless_physics_log.txt") {
+        match File::options().append(true).open("headless_periodic_state_log.txt") { // MODIFIED: Log to new file
             Ok(mut file) => {
                 // DEBUG: Confirm file opened
-                sim_log!(log_file, "[DEBUG] headless_physics_log.txt opened for append.");
+                sim_log!(log_file, "[DEBUG] headless_periodic_state_log.txt opened for append.");
 
                 let elapsed_time = time_res.elapsed_seconds_f64();
                 let current_step = logging_config.current_step;
@@ -416,11 +431,8 @@ fn log_simulation_state_periodically(
                     // DEBUG: Chassis found
                     sim_log!(log_file, "[DEBUG] Chassis found in periodic log: pos=({:.4}, {:.4})", 
                            chassis_transform.translation.x, chassis_transform.translation.y);
-                    let vel_info = match chassis_velocity {
-                        Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
-                                            vel.linvel.x, vel.linvel.y, vel.angvel),
-                        None => "NO VELOCITY COMPONENT".to_string()
-                    };
+                    let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                                            chassis_velocity.linvel.x, chassis_velocity.linvel.y, chassis_velocity.angvel);
                     
                     writeln!(file, "  Chassis: pos=({:.4}, {:.4}), rot={:.4}, {}", 
                             chassis_transform.translation.x, 
@@ -439,11 +451,8 @@ fn log_simulation_state_periodically(
                 sim_log!(log_file, "[DEBUG] Wheels found in periodic log: {}", wheel_count);
 
                 for (transform, wheel, velocity) in wheel_q.iter() {
-                    let vel_info = match velocity {
-                        Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
-                                          vel.linvel.x, vel.linvel.y, vel.angvel),
-                        None => "NO VELOCITY COMPONENT".to_string()
-                    };
+                    let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                                          velocity.linvel.x, velocity.linvel.y, velocity.angvel);
                     
                     writeln!(file, "  Wheel {}: pos=({:.4}, {:.4}), rot={:.4}, {}",
                             wheel.index,
@@ -456,7 +465,7 @@ fn log_simulation_state_periodically(
             },
             Err(e) => {
                 // DEBUG: Error opening file
-                sim_log!(log_file, "[ERROR] Failed to open headless_physics_log.txt for periodic logging: {}", e);
+                sim_log!(log_file, "[ERROR] Failed to open headless_periodic_state_log.txt for periodic logging: {}", e);
             }
         }
     }
@@ -467,24 +476,18 @@ fn log_simulation_state_periodically(
 fn log_current_state_to_file(
     _params: &HeadlessSimulationParams, 
     _metrics: &SimulationMetrics,
-    chassis_query: &mut QueryState<(&Transform, Option<&Velocity>), With<HeadlessChassis>>, // Make Velocity optional
-    wheel_query: &mut QueryState<(&Transform, &HeadlessWheel, Option<&Velocity>)>,   // Make Velocity optional
+    chassis_query: &mut QueryState<(&Transform, &Velocity), With<HeadlessChassis>>, // CHANGED: Non-optional Velocity
+    wheel_query: &mut QueryState<(&Transform, &HeadlessWheel, &Velocity)>,   // CHANGED: Non-optional Velocity
     elapsed_time: f32,
     log_file: &mut File,
     world: &World, 
 ) {
     writeln!(log_file, "--- Final State (Time={:.4}s) ---", elapsed_time).unwrap_or_default();
-    // writeln!(log_file, "HEADLESS LOG (Final): Time={:.2}s, Distance={:.2}", 
-    //         elapsed_time, 
-    //         metrics.distance_travelled).unwrap_or_default();
     
     // Use the QueryState for chassis for the final log
     if let Ok((chassis_transform, chassis_velocity)) = chassis_query.get_single(world) {
-         let vel_info = match chassis_velocity {
-             Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
-                                vel.linvel.x, vel.linvel.y, vel.angvel),
-             None => "NO VELOCITY COMPONENT".to_string()
-         };
+         let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                                chassis_velocity.linvel.x, chassis_velocity.linvel.y, chassis_velocity.angvel);
          
          writeln!(log_file, "  Chassis: pos=({:.4}, {:.4}), rot={:.4}, {}", 
                 chassis_transform.translation.x, 
@@ -498,11 +501,8 @@ fn log_current_state_to_file(
     
     // Use the QueryState for wheels for the final log
     for (transform, wheel, velocity) in wheel_query.iter(world) {
-        let vel_info = match velocity {
-            Some(vel) => format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
-                               vel.linvel.x, vel.linvel.y, vel.angvel),
-            None => "NO VELOCITY COMPONENT".to_string()
-        };
+        let vel_info = format!("linvel=({:.4}, {:.4}), angvel={:.4}", 
+                               velocity.linvel.x, velocity.linvel.y, velocity.angvel);
         
         writeln!(log_file, "  Wheel {} (QS): pos=({:.4}, {:.4}), rot={:.4}, {}",
                 wheel.index,
@@ -517,17 +517,21 @@ fn log_current_state_to_file(
 // Startup system to configure Rapier integration parameters in headless mode
 fn configure_headless_rapier_parameters(
     mut rapier_context: ResMut<RapierContext>,
-    physics_params_res: Res<PhysicsParameters>, // Your custom PhysicsParameters resource
-    log_file: Option<Res<HeadlessLogFile>> // Add log file resource
+    config: Res<SimulationConfig>, 
+    log_file: Option<Res<HeadlessLogFile>>
 ) {
     sim_log!(log_file, "[LOG Sim|HeadlessConfig] Attempting to configure Rapier integration parameters for headless mode...");
     let context = rapier_context.as_mut();
-    context.integration_parameters.erp = physics_params_res.erp;
-    context.integration_parameters.joint_erp = physics_params_res.joint_erp;
-    // dt is typically handled by Bevy's Time<Fixed> and RapierPhysicsPlugin
-    // context.integration_parameters.dt = 1.0 / 60.0; 
-    sim_log!(log_file, "[LOG Sim|HeadlessConfig] Headless Rapier erp set to: {}, joint_erp set to: {}", 
-        context.integration_parameters.erp, context.integration_parameters.joint_erp);
+    context.integration_parameters.erp = config.erp;
+    context.integration_parameters.joint_erp = config.joint_erp;
+    context.integration_parameters.max_velocity_iterations = config.solver_iterations;
+    // Removed max_position_iterations as it's not a valid field
+
+    sim_log!(log_file, "[LOG Sim|HeadlessConfig] Headless Rapier erp set to: {}, joint_erp set to: {}, max_vel_iters: {}", 
+        context.integration_parameters.erp, 
+        context.integration_parameters.joint_erp,
+        context.integration_parameters.max_velocity_iterations
+    );
 }
 
 #[derive(Debug, Clone, Resource)]
@@ -536,6 +540,17 @@ pub struct SimulationConfig {
     pub initial_height_above_ground: f32,
     pub gravity: f32,
     pub ground_friction: f32,
+    // New physics parameters
+    pub ground_restitution: f32,
+    pub erp: f32,
+    pub joint_erp: f32,
+    pub solver_iterations: usize,
+    pub ccd_enabled: bool, // Continuous Collision Detection
+    pub vehicle_damping_linear: f32,
+    pub vehicle_damping_angular: f32,
+    pub vehicle_chassis_friction: f32,
+    pub vehicle_wheel_restitution: f32,
+    // Evolutionary algorithm parameters
     pub population_size: usize,
     pub num_generations: usize,
     pub tournament_size: usize, // For tournament selection
@@ -551,19 +566,38 @@ pub enum CrossoverType {
     Uniform,
 }
 
+// Added from main.rs
+#[derive(Debug, Clone, Resource, Default)]
+pub struct BatchRunConfig {
+    pub target_generations_this_batch: Option<usize>,
+    pub generations_completed_this_batch: usize,
+    pub log_this_batch_intensively: bool,
+}
+
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             sim_duration_secs: 15.0,
-            initial_height_above_ground: 1.0, // DEBUG: Increased substantially to 1.0
+            initial_height_above_ground: 1.0,
             gravity: -9.81,
-            ground_friction: 1.0, // Increased friction for better traction
+            ground_friction: 1.0,
+            // Defaults for new physics parameters
+            ground_restitution: 0.0,        // From PhysicsParameters default
+            erp: 0.01,                      // From PhysicsParameters default
+            joint_erp: 0.01,                // From PhysicsParameters default
+            solver_iterations: 4,           // From PhysicsParameters default (Rapier default)
+            ccd_enabled: true,             // CHANGED: Enable CCD to prevent tunneling
+            vehicle_damping_linear: 0.5,    // From VehicleDefinition default
+            vehicle_damping_angular: 0.5,   // From VehicleDefinition default
+            vehicle_chassis_friction: 0.7,  // From VehicleDefinition default
+            vehicle_wheel_restitution: 0.1, // From VehicleDefinition default
+            // Evolutionary algorithm parameters
             population_size: 50,
             num_generations: 100,
             tournament_size: 5,
-            elitism_count: 2, // Carry over top 2 individuals
+            elitism_count: 2,
             mutation_rate_per_gene: 0.02,
-            mutation_rate_per_individual: 0.8, // 80% chance an individual is mutated
+            mutation_rate_per_individual: 0.8,
             crossover_type: CrossoverType::Uniform,
         }
     }

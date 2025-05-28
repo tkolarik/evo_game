@@ -1,5 +1,5 @@
 use crate::organism::{Chromosome, MIN_CHASSIS_WIDTH, MAX_CHASSIS_WIDTH, MIN_CHASSIS_HEIGHT, MAX_CHASSIS_HEIGHT, MIN_CHASSIS_DENSITY, MAX_CHASSIS_DENSITY, MIN_WHEEL_RADIUS, MAX_WHEEL_RADIUS, MIN_WHEEL_DENSITY, MAX_WHEEL_DENSITY, MIN_WHEEL_MOTOR_TORQUE, MAX_WHEEL_MOTOR_TORQUE, MIN_WHEEL_FRICTION_COEFFICIENT, MAX_WHEEL_FRICTION_COEFFICIENT, get_test_chromosome};
-use crate::simulation::{PhysicsWorld, SimulationConfig, CrossoverType};
+use crate::simulation::{PhysicsWorld, SimulationConfig, CrossoverType, BatchRunConfig};
 use rand::prelude::*;
 use rand_distr::{Normal, Distribution};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -185,10 +185,11 @@ impl Population {
         (parent1, parent2)
     }
 
-    pub fn evaluate_fitness(&mut self, physics_world: &mut PhysicsWorld, sim_config: &SimulationConfig) {
+    pub fn evaluate_fitness(&mut self, physics_world: &mut PhysicsWorld, sim_config: &SimulationConfig, batch_run_config: &BatchRunConfig) {
+        let force_intensive_logging = batch_run_config.log_this_batch_intensively;
         for individual in &mut self.individuals {
             // Ensure fitness is re-evaluated if it's an elite from a previous gen or a new offspring
-            individual.fitness = physics_world.evaluate_fitness(&individual.chromosome, sim_config);
+            individual.fitness = physics_world.evaluate_fitness(&individual.chromosome, sim_config, force_intensive_logging);
         }
         // Sort by fitness (descending) for elitism and stats
         self.individuals.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap_or(std::cmp::Ordering::Equal));
@@ -265,39 +266,49 @@ impl EvolutionEngine {
         }
     }
 
-    pub fn evolve_generation(&mut self, physics_world: &mut PhysicsWorld) {
-        self.population.evaluate_fitness(physics_world, &self.config);
-        self.update_all_time_best(); // Update Hall of Fame
+    pub fn evolve_generation(&mut self, physics_world: &mut PhysicsWorld, batch_run_config: &BatchRunConfig) {
+        let next_generation_number = self.population.generation_count + 1;
+        let mut new_population = Vec::with_capacity(self.config.population_size);
 
-        let avg_fitness = self.population.individuals.iter().map(|ind| ind.fitness).sum::<f32>() / self.population.individuals.len() as f32;
-        println!(
-            "Generation: {}, Best Fitness: {:.2}, Avg Fitness: {:.2}",
-            self.population.generation_count,
-            self.population.individuals.first().map_or(0.0, |ind| ind.fitness),
-            avg_fitness
-        );
-
-        let mut next_generation_individuals = Vec::with_capacity(self.config.population_size);
-        let next_gen_number = self.population.generation_count + 1;
-
+        // Elitism: Carry over the best individuals from the current population
         for i in 0..self.config.elitism_count {
             if i < self.population.individuals.len() {
-                let mut elite = self.population.individuals[i].clone();
-                elite.generation = next_gen_number; // Update generation for elite
-                self.phylogeny_data.push((elite.id, Some(elite.id), None, next_gen_number)); 
-                next_generation_individuals.push(elite);
+                let elite = self.population.individuals[i].clone();
+                // Elite individuals fitness is already known, no need to re-evaluate unless forced
+                new_population.push(elite);
             }
         }
 
-        while next_generation_individuals.len() < self.config.population_size {
+        // Fill the rest of the new population with offspring
+        while new_population.len() < self.config.population_size {
             let (parent1, parent2) = self.population.select_parents(&mut self.rng, self.config.tournament_size);
-            let offspring = Individual::from_parents(parent1, parent2, &mut self.rng, &self.config, next_gen_number);
-            self.phylogeny_data.push((offspring.id, Some(parent1.id), Some(parent2.id), next_gen_number));
-            next_generation_individuals.push(offspring);
+            let mut offspring = Individual::from_parents(parent1, parent2, &mut self.rng, &self.config, next_generation_number);
+            
+            // Record phylogeny for the offspring
+            self.phylogeny_data.push((offspring.id, Some(parent1.id), Some(parent2.id), next_generation_number));
+            new_population.push(offspring);
         }
 
-        self.population.individuals = next_generation_individuals;
-        self.population.generation_count = next_gen_number;
+        self.population.individuals = new_population;
+        self.population.generation_count = next_generation_number;
+
+        // Evaluate fitness for the new generation
+        self.population.evaluate_fitness(physics_world, &self.config, batch_run_config);
+        
+        // Update all-time best after evaluation
+        self.update_all_time_best();
+
+        // Optional: Print some stats
+        if self.population.generation_count % 10 == 0 || self.config.population_size <= 10 { // Print more often for small pops
+            println!(
+                "Gen: {} - Best Fitness: {:.2}, Avg Fitness: {:.2}",
+                self.population.generation_count,
+                self.population.individuals.first().map_or(0.0, |ind| ind.fitness),
+                if !self.population.individuals.is_empty() {
+                    self.population.individuals.iter().map(|ind| ind.fitness).sum::<f32>() / self.population.individuals.len() as f32
+                } else { 0.0 }
+            );
+        }
     }
 
     // pub fn run_simulation(&mut self, physics_world: &mut PhysicsWorld) {
@@ -365,7 +376,11 @@ mod tests {
         assert_eq!(population.individuals.len(), config.population_size);
         
         let mut physics_world = PhysicsWorld::new(&config);
-        population.evaluate_fitness(&mut physics_world, &config);
+        population.evaluate_fitness(&mut physics_world, &config, &BatchRunConfig { 
+            log_this_batch_intensively: false,
+            target_generations_this_batch: None,
+            generations_completed_this_batch: 0,
+        });
         assert!(population.individuals.first().unwrap().fitness >= 0.0);
     }
 
@@ -418,7 +433,11 @@ mod tests {
         assert_eq!(engine.all_time_best_individual.as_ref().unwrap().fitness, 10.0);
 
         // Simulate a generation where a new best might appear or not
-        engine.evolve_generation(&mut physics_world); // This will re-evaluate with random physics
+        engine.evolve_generation(&mut physics_world, &BatchRunConfig { 
+            log_this_batch_intensively: false,
+            target_generations_this_batch: None, 
+            generations_completed_this_batch: 0,
+        }); // This will re-evaluate with random physics
         // The test for all_time_best should be more robust if we could mock fitness after evolve_generation
         println!("All-time best after 1st evolve: {:?}", engine.all_time_best_individual.as_ref().map(|i| i.fitness));
         assert!(engine.all_time_best_individual.is_some());
@@ -429,8 +448,11 @@ mod tests {
         let config = test_config();
         let mut engine = EvolutionEngine::new(config.clone());
         let mut physics_world = PhysicsWorld::new(&config);
-        engine.evolve_generation(&mut physics_world);
-        engine.evolve_generation(&mut physics_world);
+        engine.evolve_generation(&mut physics_world, &BatchRunConfig { 
+            log_this_batch_intensively: false,
+            target_generations_this_batch: None,
+            generations_completed_this_batch: 0,
+        });
         assert_ne!(engine.population.generation_count, 0);
         assert!(!engine.phylogeny_data.is_empty());
         engine.population.individuals[0].fitness = 100.0; // Set an all time best
